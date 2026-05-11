@@ -1,8 +1,6 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
-lancedb>=0.6
-pyarrow>=15
-fastembed>=0.2
 numpy>=1.26
 scikit-learn>=1.4
+fastembed>=0.2
 pydantic>=2.5

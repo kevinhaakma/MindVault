@@ -1,14 +1,13 @@
 """
 MindVault backend — vector memory + knowledge graph for code agents.
-Vex lives here. He files things, finds things, and refuses to file secrets.
 
 Three-tier memory:
   hot  — tiny CLAUDE.md per project (agent layer, not here)
   warm — SQLite FTS5 keyword search (microseconds, ~80% of queries)
-  cold — LanceDB vector search (BGE-small, 384 dims, semantic fallback)
+  cold — SQLite BLOB vectors + numpy cosine sim (semantic fallback)
 
-Graph: edges from (a) cosine sim > 0.75, (b) temporal proximity, (c) explicit tags.
-Secrets: regex-scanned at write time, refused with 400.
+Vectors stored as float32 BLOBs in SQLite — no lancedb/rust required.
+fastembed is optional: if onnxruntime crashes, falls back to keyword-only.
 """
 import logging
 import os
@@ -23,7 +22,7 @@ from typing import Optional
 import numpy as np
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -33,24 +32,22 @@ log = logging.getLogger("mindvault")
 # --- config ---
 DATA_DIR = Path(os.environ.get("MINDVAULT_DIR", Path.home() / ".mindvault"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-LANCE_PATH = DATA_DIR / "vectors"
 SQLITE_PATH = DATA_DIR / "graph.db"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 SIM_EDGE_THRESHOLD = 0.75
 
-# fastembed caches model weights; point it at /data so it persists across restarts
 os.environ.setdefault("FASTEMBED_CACHE_PATH", str(DATA_DIR / ".cache"))
 
-# --- secret patterns Vex refuses to file ---
+# --- secret patterns ---
 SECRET_PATTERNS = [
-    (re.compile(r"sk-[a-zA-Z0-9]{20,}"),                              "OpenAI/Anthropic key (sk-)"),
-    (re.compile(r"sk-ant-[a-zA-Z0-9\-_]{20,}"),                       "Anthropic key (sk-ant-)"),
-    (re.compile(r"ghp_[a-zA-Z0-9]{20,}"),                             "GitHub PAT (ghp_)"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"),                                 "AWS access key (AKIA)"),
-    (re.compile(r"AIza[0-9A-Za-z\-_]{35}"),                           "Google API key (AIza)"),
-    (re.compile(r"xox[baprs]-[a-zA-Z0-9\-]{10,}"),                    "Slack token (xox*)"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),               "PEM private key block"),
+    (re.compile(r"sk-[a-zA-Z0-9]{20,}"),                                        "OpenAI/Anthropic key (sk-)"),
+    (re.compile(r"sk-ant-[a-zA-Z0-9\-_]{20,}"),                                 "Anthropic key (sk-ant-)"),
+    (re.compile(r"ghp_[a-zA-Z0-9]{20,}"),                                       "GitHub PAT (ghp_)"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"),                                           "AWS access key (AKIA)"),
+    (re.compile(r"AIza[0-9A-Za-z\-_]{35}"),                                     "Google API key (AIza)"),
+    (re.compile(r"xox[baprs]-[a-zA-Z0-9\-]{10,}"),                              "Slack token (xox*)"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),                         "PEM private key block"),
     (re.compile(r"eyJ[a-zA-Z0-9_\-]+\.eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+"), "JWT"),
 ]
 
@@ -62,40 +59,53 @@ def contains_secret(text: str) -> Optional[str]:
     return None
 
 
-# --- lazy globals (initialized in startup event) ---
+# --- lazy globals ---
 _embedder = None
+_embed_available: Optional[bool] = None  # None=untested, True=ok, False=broken
 sql: Optional[sqlite3.Connection] = None
-vec_table = None
 _init_error: Optional[str] = None
 
 
-def embed(texts: list[str]) -> np.ndarray:
-    global _embedder
-    if _embedder is None:
-        from fastembed import TextEmbedding
-        log.info("Loading embedding model %s ...", EMBED_MODEL)
-        _embedder = TextEmbedding(model_name=EMBED_MODEL)
-        log.info("Embedding model ready.")
-    return np.array(list(_embedder.embed(texts)), dtype=np.float32)
+def embed(texts: list[str]) -> Optional[np.ndarray]:
+    global _embedder, _embed_available
+    if _embed_available is False:
+        return None
+    try:
+        if _embedder is None:
+            from fastembed import TextEmbedding
+            log.info("Loading embedding model %s ...", EMBED_MODEL)
+            _embedder = TextEmbedding(model_name=EMBED_MODEL)
+            log.info("Embedding model ready.")
+            _embed_available = True
+        return np.array(list(_embedder.embed(texts)), dtype=np.float32)
+    except Exception as exc:
+        log.error("Embedding failed, disabling semantic search: %s", exc)
+        _embed_available = False
+        return None
 
 
+# --- storage ---
 def _init_sqlite() -> sqlite3.Connection:
     conn = sqlite3.connect(str(SQLITE_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS memories (
-            id          TEXT PRIMARY KEY,
-            content     TEXT NOT NULL,
-            project     TEXT NOT NULL,
-            kind        TEXT NOT NULL,
-            tags        TEXT,
-            created_at  REAL NOT NULL,
+            id           TEXT PRIMARY KEY,
+            content      TEXT NOT NULL,
+            project      TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            tags         TEXT,
+            created_at   REAL NOT NULL,
             access_count INTEGER DEFAULT 0,
             last_accessed REAL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
             content, tags, project,
             content='memories', content_rowid='rowid'
+        );
+        CREATE TABLE IF NOT EXISTS vectors (
+            id     TEXT PRIMARY KEY,
+            vector BLOB NOT NULL
         );
         CREATE TABLE IF NOT EXISTS edges (
             src    TEXT NOT NULL,
@@ -104,27 +114,12 @@ def _init_sqlite() -> sqlite3.Connection:
             weight REAL NOT NULL,
             PRIMARY KEY (src, dst, kind)
         );
-        CREATE INDEX IF NOT EXISTS idx_edges_src      ON edges(src);
-        CREATE INDEX IF NOT EXISTS idx_memories_proj  ON memories(project);
-        CREATE INDEX IF NOT EXISTS idx_memories_time  ON memories(created_at);
+        CREATE INDEX IF NOT EXISTS idx_edges_src     ON edges(src);
+        CREATE INDEX IF NOT EXISTS idx_memories_proj ON memories(project);
+        CREATE INDEX IF NOT EXISTS idx_memories_time ON memories(created_at);
     """)
     conn.commit()
     return conn
-
-
-def _init_lance():
-    import lancedb
-    import pyarrow as pa
-    db = lancedb.connect(str(LANCE_PATH))
-    if "memories" not in db.table_names():
-        schema = pa.schema([
-            pa.field("id",      pa.string()),
-            pa.field("vector",  pa.list_(pa.float32(), EMBED_DIM)),
-            pa.field("content", pa.string()),
-            pa.field("project", pa.string()),
-        ])
-        db.create_table("memories", schema=schema)
-    return db.open_table("memories")
 
 
 # --- app ---
@@ -141,7 +136,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    global sql, vec_table, _init_error
+    global sql, _init_error
     try:
         log.info("Initialising SQLite at %s", SQLITE_PATH)
         sql = _init_sqlite()
@@ -149,18 +144,10 @@ async def startup():
     except Exception as exc:
         _init_error = f"SQLite init failed: {exc}"
         log.error(_init_error)
-        return
-    try:
-        log.info("Initialising LanceDB at %s", LANCE_PATH)
-        vec_table = _init_lance()
-        log.info("LanceDB ready.")
-    except Exception as exc:
-        _init_error = f"LanceDB init failed: {exc}"
-        log.error(_init_error)
 
 
 def _require_db():
-    if sql is None or vec_table is None:
+    if sql is None:
         raise HTTPException(503, f"Storage not ready. {_init_error or 'Initialising...'}")
 
 
@@ -177,10 +164,10 @@ def tx():
 # --- request models ---
 class WriteRequest(BaseModel):
     content:    str
-    project:    str        = "default"
-    kind:       str        = "episode"
-    tags:       list[str]  = []
-    related_to: list[str]  = []
+    project:    str       = "default"
+    kind:       str       = "episode"
+    tags:       list[str] = []
+    related_to: list[str] = []
 
 
 class RecallRequest(BaseModel):
@@ -188,6 +175,40 @@ class RecallRequest(BaseModel):
     project: Optional[str] = None
     limit:   int           = 5
     mode:    str           = "auto"
+
+
+# --- vector helpers (pure SQLite + numpy, no lancedb) ---
+def _store_vector(mem_id: str, vec: np.ndarray):
+    sql.execute(
+        "INSERT OR REPLACE INTO vectors (id, vector) VALUES (?, ?)",
+        (mem_id, vec.astype(np.float32).tobytes()),
+    )
+
+
+def _cosine_search(query_vec: np.ndarray, project: Optional[str], limit: int) -> list[dict]:
+    if project:
+        ids = [r[0] for r in sql.execute(
+            "SELECT id FROM memories WHERE project = ?", (project,)
+        ).fetchall()]
+    else:
+        ids = [r[0] for r in sql.execute("SELECT id FROM memories").fetchall()]
+
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" * len(ids))
+    rows = sql.execute(
+        f"SELECT id, vector FROM vectors WHERE id IN ({placeholders})", ids
+    ).fetchall()
+
+    sims = []
+    for row in rows:
+        vec = np.frombuffer(row["vector"], dtype=np.float32)
+        sim = float(np.dot(query_vec, vec))
+        sims.append((row["id"], sim))
+
+    sims.sort(key=lambda x: -x[1])
+    return [{"id": mid, "score": s} for mid, s in sims[:limit]]
 
 
 # --- graph helpers ---
@@ -200,28 +221,24 @@ def _add_edge(src: str, dst: str, kind: str, weight: float):
     )
 
 
-def _auto_link(mem_id: str, vector: np.ndarray, project: str):
-    if vec_table.count_rows() < 2:
-        return
-    results = (
-        vec_table.search(vector)
-        .where(f"project = '{project}'")
-        .limit(6)
-        .to_list()
-    )
-    for r in results:
-        if r["id"] == mem_id:
+def _auto_link(mem_id: str, vec: np.ndarray, project: str):
+    neighbors = _cosine_search(vec, project, 7)
+    for n in neighbors:
+        if n["id"] == mem_id:
             continue
-        sim = 1.0 - (r.get("_distance", 2.0) / 2.0)
-        if sim >= SIM_EDGE_THRESHOLD:
-            _add_edge(mem_id, r["id"], "semantic", float(sim))
-            _add_edge(r["id"], mem_id, "semantic", float(sim))
+        if n["score"] >= SIM_EDGE_THRESHOLD:
+            _add_edge(mem_id, n["id"], "semantic", n["score"])
+            _add_edge(n["id"], mem_id, "semantic", n["score"])
 
 
 # --- routes ---
 @router.get("/health")
 def health():
-    return {"status": "ok" if (sql and vec_table) else "initialising", "error": _init_error}
+    return {
+        "status": "ok" if sql else "initialising",
+        "embed": _embed_available,
+        "error": _init_error,
+    }
 
 
 @router.post("/write")
@@ -231,16 +248,12 @@ def write(req: WriteRequest):
     if leak:
         raise HTTPException(
             400,
-            f"Vex refuses to file this. Content contains a secret-shaped string ({leak}). "
-            "Use the keychain — see `mindvault-secret set <name>`."
+            f"Vex refuses to file this. Content contains a secret-shaped string ({leak}).",
         )
 
     mem_id   = str(uuid.uuid4())
     now      = time.time()
     tags_str = ",".join(req.tags)
-
-    v = embed([req.content])[0]
-    v = v / np.linalg.norm(v)
 
     with tx() as c:
         c.execute(
@@ -265,14 +278,15 @@ def write(req: WriteRequest):
         if prev:
             _add_edge(prev["id"], mem_id, "temporal", 0.3)
 
-    vec_table.add([{
-        "id":      mem_id,
-        "vector":  v.tolist(),
-        "content": req.content,
-        "project": req.project,
-    }])
+    vecs = embed([req.content])
+    if vecs is not None:
+        v = vecs[0]
+        v = v / (np.linalg.norm(v) + 1e-9)
+        with tx():
+            _store_vector(mem_id, v)
+        sql.commit()
+        _auto_link(mem_id, v, req.project)
 
-    _auto_link(mem_id, v, req.project)
     return {"id": mem_id, "created_at": now}
 
 
@@ -283,7 +297,7 @@ def recall(req: RecallRequest):
 
     if req.mode in ("auto", "keyword"):
         proj_filter = "AND m.project = ?" if req.project else ""
-        params = [req.query]
+        params: list = [req.query]
         if req.project:
             params.append(req.project)
         params.append(req.limit)
@@ -299,25 +313,24 @@ def recall(req: RecallRequest):
         results = [dict(r) for r in rows]
 
     if req.mode == "semantic" or (req.mode == "auto" and len(results) < req.limit):
-        qv = embed([req.query])[0]
-        qv = qv / np.linalg.norm(qv)
-        search = vec_table.search(qv).limit(req.limit * 2)
-        if req.project:
-            search = search.where(f"project = '{req.project}'")
-        seen = {r["id"] for r in results}
-        for r in search.to_list():
-            if r["id"] in seen:
-                continue
-            row = sql.execute(
-                "SELECT id, content, project, kind, tags, created_at FROM memories WHERE id = ?",
-                (r["id"],),
-            ).fetchone()
-            if row:
-                d        = dict(row)
-                d["score"] = float(1.0 - r.get("_distance", 2.0) / 2.0)
-                results.append(d)
-            if len(results) >= req.limit:
-                break
+        qvecs = embed([req.query])
+        if qvecs is not None:
+            qv = qvecs[0]
+            qv = qv / (np.linalg.norm(qv) + 1e-9)
+            seen = {r["id"] for r in results}
+            for hit in _cosine_search(qv, req.project, req.limit * 2):
+                if hit["id"] in seen:
+                    continue
+                row = sql.execute(
+                    "SELECT id, content, project, kind, tags, created_at FROM memories WHERE id = ?",
+                    (hit["id"],),
+                ).fetchone()
+                if row:
+                    d = dict(row)
+                    d["score"] = hit["score"]
+                    results.append(d)
+                if len(results) >= req.limit:
+                    break
 
     now = time.time()
     for r in results[:req.limit]:
@@ -326,14 +339,12 @@ def recall(req: RecallRequest):
             (now, r["id"]),
         )
     sql.commit()
-
     return {"results": results[:req.limit]}
 
 
 @router.get("/graph")
 def graph(project: Optional[str] = None, limit: int = 1000):
     _require_db()
-    from sklearn.decomposition import PCA
     where  = "WHERE project = ?" if project else ""
     params = ([project] if project else []) + [limit]
     rows   = sql.execute(
@@ -345,30 +356,31 @@ def graph(project: Optional[str] = None, limit: int = 1000):
     if not nodes:
         return {"nodes": [], "edges": []}
 
-    ids     = [n["id"] for n in nodes]
-    id_list = ",".join(f"'{i}'" for i in ids)
-    vec_rows = (
-        vec_table.search()
-        .where(f"id IN ({id_list})")
-        .limit(len(ids))
-        .to_list()
-    )
-    vec_by_id = {r["id"]: np.array(r["vector"]) for r in vec_rows}
+    ids = [n["id"] for n in nodes]
+    coord_by_id: dict[str, list[float]] = {}
 
-    if len(vec_by_id) >= 3:
-        ordered = [i for i in ids if i in vec_by_id]
-        vecs    = np.stack([vec_by_id[i] for i in ordered])
-        coords  = PCA(n_components=2).fit_transform(vecs)
-        coords  = coords / (np.abs(coords).max() + 1e-9)
-        coord_by_id = {i: c.tolist() for i, c in zip(ordered, coords)}
-    else:
-        coord_by_id = {i: [0.0, 0.0] for i in ids}
+    if len(ids) >= 3:
+        try:
+            from sklearn.decomposition import PCA
+            placeholders = ",".join("?" * len(ids))
+            vec_rows = sql.execute(
+                f"SELECT id, vector FROM vectors WHERE id IN ({placeholders})", ids
+            ).fetchall()
+            if len(vec_rows) >= 3:
+                vec_ids = [r["id"] for r in vec_rows]
+                vecs    = np.stack([np.frombuffer(r["vector"], dtype=np.float32) for r in vec_rows])
+                coords  = PCA(n_components=2).fit_transform(vecs)
+                coords  = coords / (np.abs(coords).max() + 1e-9)
+                coord_by_id = {i: c.tolist() for i, c in zip(vec_ids, coords)}
+        except Exception as exc:
+            log.warning("PCA layout failed: %s", exc)
 
     for n in nodes:
         n["x"], n["y"] = coord_by_id.get(n["id"], [0.0, 0.0])
         n["preview"]   = n["content"][:140]
         del n["content"]
 
+    id_list   = ",".join(f"'{i}'" for i in ids)
     edge_rows = sql.execute(
         f"SELECT src, dst, kind, weight FROM edges WHERE src IN ({id_list})"
     ).fetchall()
@@ -396,10 +408,7 @@ def delete_memory(mem_id: str):
             c.execute("DELETE FROM memories_fts WHERE rowid = ?", (rowid_row[0],))
         c.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
         c.execute("DELETE FROM edges WHERE src = ? OR dst = ?", (mem_id, mem_id))
-    try:
-        vec_table.delete(f"id = '{mem_id}'")
-    except Exception:
-        pass
+        c.execute("DELETE FROM vectors WHERE id = ?", (mem_id,))
     return {"deleted": mem_id}
 
 
@@ -431,14 +440,14 @@ def stats():
     return {"memories": total, "edges": edge_ct, "projects": projects}
 
 
-# Mount routes at both / (local dev via vite proxy) and /api/ (production)
+# Mount at both / (dev proxy) and /api/ (production)
 app.include_router(router)
 app.include_router(router, prefix="/api")
 
-# Static GUI serving
+# Static GUI
 STATIC_DIR = os.environ.get("MINDVAULT_STATIC")
 if STATIC_DIR and Path(STATIC_DIR).exists():
-    _static = Path(STATIC_DIR)
+    _static    = Path(STATIC_DIR)
     assets_dir = _static / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
