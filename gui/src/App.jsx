@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Cosmograph, CosmographProvider } from "@cosmograph/react";
+import { Cosmograph, CosmographProvider, useCosmographRef } from "@cosmograph/react";
 import { VexAvatar } from "./VexAvatar.jsx";
 
 const KIND_COLORS = {
@@ -193,17 +193,7 @@ export default function App() {
       {/* ── Graph canvas ── */}
       <div style={{ flex: 1, position: "relative" }}>
         <CosmographProvider nodes={cosmoNodes} links={cosmoLinks}>
-          <Cosmograph
-            style={{ position: "absolute", inset: 0 }}
-            backgroundColor="#0a0a12"
-            nodeColor={(n) => n.color}
-            nodeSize={(n) => n.size}
-            linkColor={(l) => l.color}
-            linkWidth={(l) => l.width}
-            linkArrows={false}
-            simulationFriction={0.85}
-            simulationLinkSpring={0.4}
-            simulationRepulsion={0.6}
+          <GraphCanvas
             onNodeClick={(n) => setSelected(n || null)}
           />
         </CosmographProvider>
@@ -259,6 +249,35 @@ export default function App() {
         )}
       </div>
     </div>
+  );
+}
+
+function GraphCanvas({ onNodeClick }) {
+  const cosmographRef = useCosmographRef();
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      cosmographRef.current?.fitView();
+    }, 300);
+    return () => clearTimeout(t);
+  });
+
+  return (
+    <Cosmograph
+      ref={cosmographRef}
+      style={{ position: "absolute", inset: 0 }}
+      backgroundColor="#0a0a12"
+      nodeColor={(n) => n.color}
+      nodeSize={(n) => n.size}
+      linkColor={(l) => l.color}
+      linkWidth={(l) => l.width}
+      linkArrows={false}
+      simulationDecay={200}
+      simulationFriction={0.85}
+      simulationLinkSpring={0.4}
+      simulationRepulsion={0.6}
+      onNodeClick={onNodeClick}
+    />
   );
 }
 
