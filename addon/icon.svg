@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="60%" stop-color="#0f0f1e"/>
+      <stop offset="100%" stop-color="#050510"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#5b9dff" stop-opacity="1"/>
+      <stop offset="60%" stop-color="#5b9dff" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#5b9dff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowA" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffb454" stop-opacity="1"/>
+      <stop offset="60%" stop-color="#ffb454" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#ffb454" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowP" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff6b9d" stop-opacity="1"/>
+      <stop offset="60%" stop-color="#ff6b9d" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#ff6b9d" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowG" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#7ee787" stop-opacity="1"/>
+      <stop offset="60%" stop-color="#7ee787" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#7ee787" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5b9dff"/>
+      <stop offset="100%" stop-color="#b86bff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="256" height="256" rx="48" fill="url(#bg)"/>
+
+  <!-- stars -->
+  <circle cx="38"  cy="44"  r="0.9" fill="#fff" opacity="0.55"/>
+  <circle cx="210" cy="60"  r="0.7" fill="#fff" opacity="0.45"/>
+  <circle cx="220" cy="200" r="1.0" fill="#fff" opacity="0.6"/>
+  <circle cx="45"  cy="210" r="0.8" fill="#fff" opacity="0.5"/>
+  <circle cx="100" cy="35"  r="0.6" fill="#fff" opacity="0.4"/>
+  <circle cx="190" cy="100" r="0.7" fill="#fff" opacity="0.5"/>
+  <circle cx="60"  cy="140" r="0.6" fill="#fff" opacity="0.45"/>
+  <circle cx="180" cy="170" r="0.9" fill="#fff" opacity="0.55"/>
+  <circle cx="155" cy="220" r="0.6" fill="#fff" opacity="0.4"/>
+  <circle cx="75"  cy="80"  r="0.5" fill="#fff" opacity="0.35"/>
+
+  <!-- outer ring -->
+  <circle cx="128" cy="128" r="100" fill="none" stroke="url(#ring)" stroke-width="1.2" opacity="0.5"/>
+  <circle cx="128" cy="128" r="74"  fill="none" stroke="#5b9dff" stroke-width="0.6" opacity="0.25"/>
+
+  <!-- edges (semantic glow lines) -->
+  <g stroke-linecap="round" fill="none">
+    <line x1="128" y1="64"  x2="78"  y2="118" stroke="#5b9dff" stroke-width="1.6" opacity="0.55"/>
+    <line x1="128" y1="64"  x2="178" y2="118" stroke="#5b9dff" stroke-width="1.6" opacity="0.55"/>
+    <line x1="78"  y1="118" x2="128" y2="128" stroke="#ffb454" stroke-width="1.8" opacity="0.65"/>
+    <line x1="178" y1="118" x2="128" y2="128" stroke="#ffb454" stroke-width="1.8" opacity="0.65"/>
+    <line x1="128" y1="128" x2="92"  y2="186" stroke="#ff6b9d" stroke-width="2.0" opacity="0.7"/>
+    <line x1="128" y1="128" x2="164" y2="186" stroke="#7ee787" stroke-width="1.6" opacity="0.6"/>
+    <line x1="92"  y1="186" x2="164" y2="186" stroke="rgba(255,255,255,0.2)" stroke-width="0.9"/>
+  </g>
+
+  <!-- node halos -->
+  <circle cx="128" cy="64"  r="18" fill="url(#glowB)"/>
+  <circle cx="78"  cy="118" r="14" fill="url(#glowA)"/>
+  <circle cx="178" cy="118" r="14" fill="url(#glowA)"/>
+  <circle cx="128" cy="128" r="28" fill="url(#glowP)"/>
+  <circle cx="92"  cy="186" r="12" fill="url(#glowG)"/>
+  <circle cx="164" cy="186" r="12" fill="url(#glowG)"/>
+
+  <!-- node cores -->
+  <circle cx="128" cy="64"  r="6.5" fill="#5b9dff" stroke="#cfe2ff" stroke-width="0.7"/>
+  <circle cx="78"  cy="118" r="5"   fill="#ffb454" stroke="#ffe2bc" stroke-width="0.6"/>
+  <circle cx="178" cy="118" r="5"   fill="#ffb454" stroke="#ffe2bc" stroke-width="0.6"/>
+  <circle cx="128" cy="128" r="9.5" fill="#ff6b9d" stroke="#ffd0e1" stroke-width="0.8"/>
+  <circle cx="92"  cy="186" r="4.2" fill="#7ee787" stroke="#d4f5d8" stroke-width="0.5"/>
+  <circle cx="164" cy="186" r="4.2" fill="#7ee787" stroke="#d4f5d8" stroke-width="0.5"/>
+</svg>

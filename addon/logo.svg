@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 200" width="500" height="200">
+  <defs>
+    <radialGradient id="bg2" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#050510"/>
+    </radialGradient>
+    <linearGradient id="title" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#5b9dff"/>
+      <stop offset="100%" stop-color="#b86bff"/>
+    </linearGradient>
+    <radialGradient id="glowB2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#5b9dff" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#5b9dff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowP2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff6b9d" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#ff6b9d" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowA2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffb454" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#ffb454" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="500" height="200" fill="url(#bg2)"/>
+
+  <!-- mini constellation -->
+  <g transform="translate(40,40)">
+    <circle cx="60" cy="60" r="56" fill="none" stroke="#5b9dff" stroke-width="0.5" opacity="0.4"/>
+    <g stroke-linecap="round" fill="none" opacity="0.7">
+      <line x1="60" y1="20" x2="30" y2="60"  stroke="#5b9dff" stroke-width="1.2"/>
+      <line x1="60" y1="20" x2="90" y2="60"  stroke="#5b9dff" stroke-width="1.2"/>
+      <line x1="30" y1="60" x2="60" y2="60"  stroke="#ffb454" stroke-width="1.4"/>
+      <line x1="90" y1="60" x2="60" y2="60"  stroke="#ffb454" stroke-width="1.4"/>
+      <line x1="60" y1="60" x2="40" y2="100" stroke="#ff6b9d" stroke-width="1.5"/>
+      <line x1="60" y1="60" x2="80" y2="100" stroke="#7ee787" stroke-width="1.2"/>
+    </g>
+    <circle cx="60" cy="20"  r="15" fill="url(#glowB2)"/>
+    <circle cx="30" cy="60"  r="11" fill="url(#glowA2)"/>
+    <circle cx="90" cy="60"  r="11" fill="url(#glowA2)"/>
+    <circle cx="60" cy="60"  r="22" fill="url(#glowP2)"/>
+    <circle cx="60" cy="20"  r="4.5" fill="#5b9dff"/>
+    <circle cx="30" cy="60"  r="3.5" fill="#ffb454"/>
+    <circle cx="90" cy="60"  r="3.5" fill="#ffb454"/>
+    <circle cx="60" cy="60"  r="6.5" fill="#ff6b9d"/>
+    <circle cx="40" cy="100" r="3"   fill="#7ee787"/>
+    <circle cx="80" cy="100" r="3"   fill="#7ee787"/>
+  </g>
+
+  <!-- title -->
+  <text x="180" y="115" font-family="Inter,Segoe UI,sans-serif" font-size="50" font-weight="800" fill="url(#title)" letter-spacing="-1">
+    MindVault
+  </text>
+  <text x="182" y="145" font-family="Inter,Segoe UI,sans-serif" font-size="13" font-weight="500" fill="#777" letter-spacing="3.5" text-transform="uppercase">
+    VEX · MEMORY ARCHIVE
+  </text>
+</svg>
