@@ -80,25 +80,111 @@ function hashId(s) {
   return h;
 }
 
-// ── Constellation (custom SVG graph — pan/zoom, hover highlight, drift) ─────
+// ── Constellation (force-directed SVG graph) ────────────────────────────────
 function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId, hoverId, setHoverId }) {
   const wrapRef = useRef(null);
   const [viewport, setViewport] = useState({ w: 1000, h: 800 });
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const [time, setTime] = useState(0);
   const dragRef = useRef(null);
+  const simRef  = useRef(new Map());   // id → {x, y, vx, vy} in normalized space
 
-  // animation loop — drives drift + pulse
+  // sync sim entries with current node set (preserve positions of existing nodes)
+  useEffect(() => {
+    const next = new Map();
+    for (const n of nodes) {
+      const ex = simRef.current.get(n.id);
+      if (ex) {
+        next.set(n.id, ex);
+      } else {
+        // seed new nodes from PCA coords + tiny jitter
+        next.set(n.id, {
+          x: (n.x ?? 0) + (Math.random()-0.5) * 0.02,
+          y: (n.y ?? 0) + (Math.random()-0.5) * 0.02,
+          vx: 0, vy: 0,
+        });
+      }
+    }
+    simRef.current = next;
+  }, [nodes]);
+
+  // force-directed sim loop + time driver
   useEffect(() => {
     let raf;
-    const start = performance.now();
-    const loop = () => {
-      setTime((performance.now() - start) / 1000);
-      raf = requestAnimationFrame(loop);
+    let last  = performance.now();
+    const start = last;
+
+    // tuning (normalized -1..1 space)
+    const REPEL   = 0.012;
+    const SPRING  = 1.6;
+    const IDEAL   = 0.22;   // ideal edge length
+    const DAMP    = 0.86;
+    const GRAVITY = 0.45;
+    const MAX_V   = 1.5;
+    const SIM_K   = 6;      // sim speed multiplier
+
+    const step = () => {
+      const now = performance.now();
+      const dt  = Math.min(0.033, (now - last) / 1000);
+      last = now;
+
+      const m   = simRef.current;
+      const arr = [...m.values()];
+
+      // pairwise repulsion (O(n²) but n is small)
+      for (let i = 0; i < arr.length; i++) {
+        const a = arr[i];
+        for (let j = i+1; j < arr.length; j++) {
+          const b  = arr[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const d2 = dx*dx + dy*dy + 0.0008;
+          const d  = Math.sqrt(d2);
+          const f  = REPEL / d2;
+          const fx = (dx/d) * f;
+          const fy = (dy/d) * f;
+          a.vx -= fx; a.vy -= fy;
+          b.vx += fx; b.vy += fy;
+        }
+      }
+
+      // edge springs (weight scales pull strength)
+      for (const e of edges) {
+        const a = m.get(e.src);
+        const b = m.get(e.dst);
+        if (!a || !b) continue;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d  = Math.sqrt(dx*dx + dy*dy) + 0.001;
+        const w  = 0.3 + (e.weight || 0.3);
+        const force = (d - IDEAL) * SPRING * w;
+        const fx = (dx/d) * force;
+        const fy = (dy/d) * force;
+        a.vx += fx; a.vy += fy;
+        b.vx -= fx; b.vy -= fy;
+      }
+
+      // gravity + integrate
+      for (const n of arr) {
+        n.vx += -n.x * GRAVITY * dt;
+        n.vy += -n.y * GRAVITY * dt;
+        n.vx *= DAMP;
+        n.vy *= DAMP;
+        // clamp velocity
+        if (n.vx >  MAX_V) n.vx =  MAX_V;
+        if (n.vx < -MAX_V) n.vx = -MAX_V;
+        if (n.vy >  MAX_V) n.vy =  MAX_V;
+        if (n.vy < -MAX_V) n.vy = -MAX_V;
+        n.x += n.vx * dt * SIM_K;
+        n.y += n.vy * dt * SIM_K;
+      }
+
+      setTime((now - start) / 1000);
+      raf = requestAnimationFrame(step);
     };
-    raf = requestAnimationFrame(loop);
+    raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [edges, nodes]);
 
   useEffect(() => {
     const el = wrapRef.current; if (!el) return;
@@ -159,25 +245,17 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
     };
   }, [handleMouseMove, handleMouseUp]);
 
-  // map -1..1 coords → pixels (+ drift)
+  // map normalized sim coords → pixels
   const scale = Math.min(viewport.w, viewport.h) * 0.42;
   const cx = viewport.w / 2;
   const cy = viewport.h / 2;
-  const driftAmp = 14;
   const nodePos = useMemo(() => {
     const m = new Map();
+    const sim = simRef.current;
     nodes.forEach(n => {
-      const seed   = hashId(n.id);
-      const f1     = 0.13 + ((seed       & 0xf) / 0xf) * 0.18;  // ~0.13–0.31 Hz
-      const f2     = 0.10 + (((seed>>4)  & 0xf) / 0xf) * 0.15;
-      const p1     = ((seed>>8)  & 0xff) / 0xff * Math.PI * 2;
-      const p2     = ((seed>>16) & 0xff) / 0xff * Math.PI * 2;
-      const dx = Math.sin(time * f1 + p1) * driftAmp;
-      const dy = Math.cos(time * f2 + p2) * driftAmp;
-      m.set(n.id, {
-        x: cx + (n.x ?? 0) * scale + dx,
-        y: cy + (n.y ?? 0) * scale + dy,
-      });
+      const s = sim.get(n.id);
+      if (!s) return;
+      m.set(n.id, { x: cx + s.x * scale, y: cy + s.y * scale });
     });
     return m;
   }, [nodes, viewport.w, viewport.h, time]);
