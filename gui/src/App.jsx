@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Cosmograph, CosmographProvider, useCosmographRef } from "@cosmograph/react";
+import { Cosmograph, CosmographProvider, useCosmograph, CosmographButtonFitView } from "@cosmograph/react";
 import { VexAvatar } from "./VexAvatar.jsx";
 
 const KIND_COLORS = {
@@ -53,26 +53,31 @@ function Starfield() {
 
 // ── Inner graph component (needs CosmographProvider context) ─────────────────
 function GraphCanvas({ onNodeClick }) {
-  const cosmographRef = useCosmographRef();
+  const { fitView } = useCosmograph();
   const handleInit = useCallback(() => {
-    setTimeout(() => cosmographRef.current?.fitView(), 250);
-  }, []);
+    setTimeout(() => fitView?.(), 250);
+  }, [fitView]);
   return (
-    <Cosmograph
-      style={{ position:"absolute", inset:0 }}
-      backgroundColor="transparent"
-      nodeColor={n => n.color}
-      nodeSize={n => n.size}
-      linkColor={l => l.color}
-      linkWidth={l => l.width}
-      linkArrows={false}
-      simulationDecay={200}
-      simulationFriction={0.85}
-      simulationLinkSpring={0.4}
-      simulationRepulsion={0.6}
-      onInitialized={handleInit}
-      onNodeClick={onNodeClick}
-    />
+    <>
+      <Cosmograph
+        style={{ position:"absolute", inset:0 }}
+        backgroundColor="transparent"
+        nodeColor={n => n.color}
+        nodeSize={n => n.size}
+        linkColor={l => l.color}
+        linkWidth={l => l.width}
+        linkArrows={false}
+        simulationDecay={200}
+        simulationFriction={0.85}
+        simulationLinkSpring={0.4}
+        simulationRepulsion={0.6}
+        onInitialized={handleInit}
+        onNodeClick={onNodeClick}
+      />
+      <div style={{ position:"absolute", bottom:52, right:20, zIndex:5 }}>
+        <CosmographButtonFitView />
+      </div>
+    </>
   );
 }
 
