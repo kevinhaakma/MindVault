@@ -95,42 +95,58 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
   const [viewport, setViewport] = useState({ w: 1000, h: 800 });
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const [time, setTime] = useState(0);
-  const dragRef = useRef(null);
-  const simRef  = useRef(new Map());   // id → {x, y, vx, vy} in normalized space
+  const dragRef  = useRef(null);
+  const simRef   = useRef(new Map());   // id → {x, y, vx, vy, project} normalized
+  const edgesRef = useRef(edges);       // latest edges for sim loop
 
-  // sync sim entries with current node set (preserve positions of existing nodes)
+  // project anchor — deterministic per project name, places clusters around a ring
+  const projAnchor = useCallback((project) => {
+    const h = hashId(project || "default");
+    const angle  = ((h & 0xFFFF) / 0xFFFF) * Math.PI * 2;
+    const radius = 0.45;
+    return { ax: Math.cos(angle) * radius, ay: Math.sin(angle) * radius };
+  }, []);
+
+  // sync sim entries with current node set — preserve existing positions
   useEffect(() => {
     const next = new Map();
     for (const n of nodes) {
       const ex = simRef.current.get(n.id);
       if (ex) {
+        ex.project = n.project;  // update in case it changed
         next.set(n.id, ex);
       } else {
-        // seed new nodes from PCA coords + tiny jitter
+        // seed new node near its project anchor + small jitter
+        const a = projAnchor(n.project);
         next.set(n.id, {
-          x: (n.x ?? 0) + (Math.random()-0.5) * 0.02,
-          y: (n.y ?? 0) + (Math.random()-0.5) * 0.02,
+          x: a.ax + (Math.random()-0.5) * 0.15,
+          y: a.ay + (Math.random()-0.5) * 0.15,
           vx: 0, vy: 0,
+          project: n.project,
         });
       }
     }
     simRef.current = next;
-  }, [nodes]);
+  }, [nodes, projAnchor]);
 
-  // force-directed sim loop + time driver
+  // keep edges available to the sim without restarting the loop
+  useEffect(() => { edgesRef.current = edges; }, [edges]);
+
+  // force-directed sim loop + time driver — runs ONCE per mount
   useEffect(() => {
     let raf;
     let last  = performance.now();
     const start = last;
 
-    // tuning (normalized -1..1 space)
-    const REPEL   = 0.012;
-    const SPRING  = 1.6;
-    const IDEAL   = 0.22;   // ideal edge length
-    const DAMP    = 0.86;
-    const GRAVITY = 0.45;
-    const MAX_V   = 1.5;
-    const SIM_K   = 6;      // sim speed multiplier
+    // tuning (normalized space, ~-1..1)
+    const REPEL    = 0.018;
+    const SPRING   = 1.8;
+    const IDEAL    = 0.18;
+    const DAMP     = 0.85;
+    const GRAVITY  = 0.28;
+    const CLUSTER  = 0.55;   // pull toward project anchor
+    const MAX_V    = 1.4;
+    const SIM_K    = 6;
 
     const step = () => {
       const now = performance.now();
@@ -138,9 +154,10 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
       last = now;
 
       const m   = simRef.current;
+      const es  = edgesRef.current;
       const arr = [...m.values()];
 
-      // pairwise repulsion (O(n²) but n is small)
+      // pairwise repulsion
       for (let i = 0; i < arr.length; i++) {
         const a = arr[i];
         for (let j = i+1; j < arr.length; j++) {
@@ -157,8 +174,8 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
         }
       }
 
-      // edge springs (weight scales pull strength)
-      for (const e of edges) {
+      // edge springs (weight scales pull)
+      for (const e of es) {
         const a = m.get(e.src);
         const b = m.get(e.dst);
         if (!a || !b) continue;
@@ -173,13 +190,17 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
         b.vx -= fx; b.vy -= fy;
       }
 
-      // gravity + integrate
+      // gravity + cluster pull + integrate
       for (const n of arr) {
+        const anchor = projAnchor(n.project);
+        // weak global gravity
         n.vx += -n.x * GRAVITY * dt;
         n.vy += -n.y * GRAVITY * dt;
+        // project clustering — pulls node toward its project anchor
+        n.vx += (anchor.ax - n.x) * CLUSTER * dt;
+        n.vy += (anchor.ay - n.y) * CLUSTER * dt;
         n.vx *= DAMP;
         n.vy *= DAMP;
-        // clamp velocity
         if (n.vx >  MAX_V) n.vx =  MAX_V;
         if (n.vx < -MAX_V) n.vx = -MAX_V;
         if (n.vy >  MAX_V) n.vy =  MAX_V;
@@ -193,7 +214,7 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [edges, nodes]);
+  }, [projAnchor]);
 
   useEffect(() => {
     const el = wrapRef.current; if (!el) return;
@@ -731,8 +752,6 @@ export default function App() {
   const [vexMood,         setVexMood]         = useState("neutral");
   const [hoverId,         setHoverId]         = useState(null);
   const [lastUpdated,     setLastUpdated]     = useState(null);
-  const [autoRefresh,     setAutoRefresh]     = useState(true);
-  const [refreshing,      setRefreshing]      = useState(false);
   const [, forceTick]                         = useState(0);
   const moodTimer = useRef(null);
 
@@ -742,8 +761,20 @@ export default function App() {
     moodTimer.current = setTimeout(() => setVexMood("neutral"), ms);
   }, []);
 
-  const refresh = useCallback(async () => {
-    setRefreshing(true);
+  // Hash to detect when graph data actually changed
+  const lastHashRef = useRef({ m: -1, e: -1 });
+
+  const fetchGraph = useCallback(async () => {
+    const url = "/api/graph" + (selectedProject
+      ? `?project=${encodeURIComponent(selectedProject)}` : "");
+    try {
+      const g = await fetch(url).then(r => r.json());
+      setGraph(g);
+      setLastUpdated(Date.now());
+    } catch {}
+  }, [selectedProject]);
+
+  const tick = useCallback(async () => {
     try {
       const [s, h] = await Promise.all([
         fetch("/api/stats").then(r => r.json()),
@@ -752,26 +783,31 @@ export default function App() {
       setStats(s);
       setProjects(s.projects || []);
       setVersion(h.version || null);
-      const url = "/api/graph" + (selectedProject
-        ? `?project=${encodeURIComponent(selectedProject)}` : "");
-      const g = await fetch(url).then(r => r.json());
-      setGraph(g);
-      setLastUpdated(Date.now());
+      // refetch graph only when memory/edge counts changed
+      const ms = s.memories ?? 0;
+      const es = s.edges    ?? 0;
+      if (ms !== lastHashRef.current.m || es !== lastHashRef.current.e) {
+        lastHashRef.current = { m: ms, e: es };
+        await fetchGraph();
+      } else {
+        setLastUpdated(Date.now());
+      }
     } catch (e) {
-      console.error("refresh failed", e);
-      vexSay("frown");
-    } finally {
-      setRefreshing(false);
+      console.error("tick failed", e);
     }
-  }, [selectedProject, vexSay]);
+  }, [fetchGraph]);
 
-  useEffect(() => { refresh(); }, [refresh]);
-
+  // immediate fetch on mount + project change
   useEffect(() => {
-    if (!autoRefresh) return;
-    const id = setInterval(refresh, 30_000);
+    lastHashRef.current = { m: -1, e: -1 };
+    tick();
+  }, [tick, selectedProject]);
+
+  // live polling — every 2s
+  useEffect(() => {
+    const id = setInterval(tick, 2000);
     return () => clearInterval(id);
-  }, [autoRefresh, refresh]);
+  }, [tick]);
 
   useEffect(() => {
     const id = setInterval(() => forceTick(t => t+1), 5000);
@@ -803,11 +839,11 @@ export default function App() {
       else if (e.key === "1") setView("constellation");
       else if (e.key === "2") setView("archive");
       else if (e.key === "3") setView("file");
-      else if (e.key === "r" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); refresh(); }
+      else if (e.key === "r" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); tick(); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, fullMemory, search, refresh]);
+  }, [selected, fullMemory, search, tick]);
 
   // filter pipeline
   const timeFiltered = useMemo(() => {
@@ -900,7 +936,8 @@ export default function App() {
     if (!confirm("Delete this memory? This cannot be undone.")) return;
     await fetch(`/api/memory/${selected.id}`, { method:"DELETE" });
     setSelected(null); setFullMemory(null);
-    refresh();
+    lastHashRef.current = { m: -1, e: -1 };
+    tick();
     vexSay("thumbsup");
   };
 
@@ -909,7 +946,8 @@ export default function App() {
     const params = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
     const r = await fetch(`/api/prune-orphans${params}`, { method:"POST" }).then(r=>r.json());
     alert(`Vex pruned ${r.count} orphan${r.count===1?"":"s"}.`);
-    refresh();
+    lastHashRef.current = { m: -1, e: -1 };
+    tick();
   };
 
   return (
@@ -942,12 +980,6 @@ export default function App() {
                 Vex archive {version && `· v${version}`}
               </div>
             </div>
-            {refreshing && (
-              <div style={{
-                marginLeft:"auto", width:6, height:6, borderRadius:"50%",
-                background:"#5b9dff", animation:"pulse 1s infinite",
-              }} />
-            )}
           </div>
         </div>
 
@@ -1050,26 +1082,23 @@ export default function App() {
           </>
         )}
 
-        {/* Actions */}
+        {/* Live indicator + actions */}
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-          <SBtn onClick={refresh}>
+          <div style={{
+            display:"flex", alignItems:"center", gap:8, fontSize:10, color:"#555",
+            padding:"6px 10px", borderRadius:6,
+            background:"rgba(126,231,135,0.04)", border:"1px solid rgba(126,231,135,0.12)",
+          }}>
             <span style={{
-              display:"inline-block",
-              animation: refreshing ? "spin 0.8s linear infinite" : "none",
-              transformOrigin: "center",
-            }}>↺</span>
-            {" "}
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </SBtn>
-          <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:11, color:"#777", cursor:"pointer", padding:"4px 2px" }}>
-            <input type="checkbox" checked={autoRefresh}
-              onChange={e => setAutoRefresh(e.target.checked)}
-              style={{ accentColor:"#5b9dff", cursor:"pointer" }} />
-            Auto-refresh (30s)
-            {lastUpdated && (
-              <span style={{ marginLeft:"auto", color:"#444", fontSize:10 }}>{timeAgo(lastUpdated)}</span>
-            )}
-          </label>
+              width:6, height:6, borderRadius:"50%", background:"#7ee787",
+              boxShadow:"0 0 6px #7ee787",
+              animation:"pulse 2s ease-in-out infinite",
+            }} />
+            <span style={{ color:"#7ee787", fontWeight:600, letterSpacing:0.5 }}>LIVE</span>
+            <span style={{ marginLeft:"auto", color:"#444" }}>
+              {lastUpdated ? timeAgo(lastUpdated) : "…"}
+            </span>
+          </div>
           {view !== "file" && (
             <SBtn onClick={pruneOrphans} danger>Prune orphans</SBtn>
           )}
@@ -1126,7 +1155,7 @@ export default function App() {
         {view === "file" && (
           <FileForm
             projects={projects}
-            onWrote={() => { refresh(); }}
+            onWrote={() => { lastHashRef.current = { m: -1, e: -1 }; tick(); }}
             vexSay={vexSay}
           />
         )}
