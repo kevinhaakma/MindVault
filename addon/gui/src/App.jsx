@@ -8,6 +8,12 @@ const KIND_COLORS = {
   decision:  "#ff6b9d",
   reference: "#7ee787",
 };
+const KIND_SIZES = {
+  decision:  16,
+  lesson:    11,
+  reference:  8,
+  episode:    5,
+};
 const EDGE_COLORS = {
   semantic: "rgba(120,160,255,0.4)",
   explicit: "rgba(255,180,100,0.75)",
@@ -193,7 +199,9 @@ export default function App() {
     x:     n.x * 800,
     y:     n.y * 800,
     color: heatMode ? heatColor((n.access_count||0)/maxAccess) : (KIND_COLORS[n.kind]||"#888"),
-    size:  4 + 3 * Math.sqrt((n.access_count||0)/maxAccess),
+    size:  heatMode
+      ? 4 + 8 * ((n.access_count||0)/maxAccess)
+      : (KIND_SIZES[n.kind]||5) + Math.sqrt(n.access_count||0) * 0.6,
   })), [visible.nodes, heatMode, maxAccess]);
 
   const cosmoLinks = useMemo(() => visible.edges.map(e => ({
@@ -479,13 +487,19 @@ function Legend({ heatMode }) {
     <div>
       <Label>Kinds</Label>
       <div style={{ display:"flex", flexDirection:"column", gap:5, fontSize:12, color:"#888" }}>
-        {Object.entries(KIND_COLORS).map(([k,c]) => (
-          <div key={k} style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ width:8, height:8, borderRadius:"50%", background:c,
-              boxShadow:`0 0 4px ${c}`, flexShrink:0 }} />
-            {k}
-          </div>
-        ))}
+        {Object.entries(KIND_COLORS).map(([k,c]) => {
+          const sz = Math.round((KIND_SIZES[k]||5) * 1.2);
+          return (
+            <div key={k} style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <span style={{
+                width:sz, height:sz, borderRadius:"50%", background:c,
+                boxShadow:`0 0 ${sz/2}px ${c}`, flexShrink:0,
+                display:"inline-block",
+              }} />
+              <span style={{ color:"#aaa" }}>{k}</span>
+            </div>
+          );
+        })}
         <div style={{ borderTop:"1px solid rgba(255,255,255,0.05)", marginTop:6, paddingTop:8 }}>
           <Label>Edges</Label>
           {[["semantic",EDGE_COLORS.semantic],["explicit",EDGE_COLORS.explicit],["temporal",EDGE_COLORS.temporal]].map(([k,c]) => (
