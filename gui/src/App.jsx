@@ -52,13 +52,17 @@ function Starfield() {
 }
 
 // ── Inner graph component (needs CosmographProvider context) ─────────────────
-function GraphCanvas({ onNodeClick }) {
+function GraphCanvas({ nodes, links, onNodeClick }) {
   const { cosmograph } = useCosmograph();
-  const handleInit = useCallback(() => {
-    setTimeout(() => cosmograph?.fitView(), 250);
-  }, [cosmograph]);
+
+  useEffect(() => {
+    if (cosmograph) setTimeout(() => cosmograph.fitView(), 300);
+  }, [cosmograph, nodes]);
+
   return (
     <Cosmograph
+      nodes={nodes}
+      links={links}
       style={{ position:"absolute", inset:0 }}
       backgroundColor="transparent"
       nodeColor={n => n.color}
@@ -70,7 +74,6 @@ function GraphCanvas({ onNodeClick }) {
       simulationFriction={0.85}
       simulationLinkSpring={0.4}
       simulationRepulsion={0.6}
-      onInitialized={handleInit}
       onNodeClick={onNodeClick}
     />
   );
@@ -335,8 +338,8 @@ export default function App() {
       {/* ── Graph canvas ─────────────────────────────────────────────────── */}
       <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
         <Starfield />
-        <CosmographProvider nodes={cosmoNodes} links={cosmoLinks}>
-          <GraphCanvas onNodeClick={n => setSelected(n||null)} />
+        <CosmographProvider>
+          <GraphCanvas nodes={cosmoNodes} links={cosmoLinks} onNodeClick={n => setSelected(n||null)} />
         </CosmographProvider>
 
         {/* Node detail card */}
