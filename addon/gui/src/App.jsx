@@ -73,12 +73,32 @@ function Starfield() {
   );
 }
 
-// ── Constellation (custom SVG graph — pan/zoom, hover highlight) ────────────
+// stable hash → seed
+function hashId(s) {
+  let h = 0;
+  for (let i = 0; i < (s?.length||0); i++) h = ((h * 31) + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+// ── Constellation (custom SVG graph — pan/zoom, hover highlight, drift) ─────
 function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId, hoverId, setHoverId }) {
   const wrapRef = useRef(null);
   const [viewport, setViewport] = useState({ w: 1000, h: 800 });
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
+  const [time, setTime] = useState(0);
   const dragRef = useRef(null);
+
+  // animation loop — drives drift + pulse
+  useEffect(() => {
+    let raf;
+    const start = performance.now();
+    const loop = () => {
+      setTime((performance.now() - start) / 1000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   useEffect(() => {
     const el = wrapRef.current; if (!el) return;
@@ -139,19 +159,28 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
     };
   }, [handleMouseMove, handleMouseUp]);
 
-  // map -1..1 coords → pixels
+  // map -1..1 coords → pixels (+ drift)
   const scale = Math.min(viewport.w, viewport.h) * 0.42;
   const cx = viewport.w / 2;
   const cy = viewport.h / 2;
-  const toPx = (n) => ({
-    x: cx + (n.x ?? 0) * scale,
-    y: cy + (n.y ?? 0) * scale,
-  });
+  const driftAmp = 14;
   const nodePos = useMemo(() => {
     const m = new Map();
-    nodes.forEach(n => m.set(n.id, toPx(n)));
+    nodes.forEach(n => {
+      const seed   = hashId(n.id);
+      const f1     = 0.13 + ((seed       & 0xf) / 0xf) * 0.18;  // ~0.13–0.31 Hz
+      const f2     = 0.10 + (((seed>>4)  & 0xf) / 0xf) * 0.15;
+      const p1     = ((seed>>8)  & 0xff) / 0xff * Math.PI * 2;
+      const p2     = ((seed>>16) & 0xff) / 0xff * Math.PI * 2;
+      const dx = Math.sin(time * f1 + p1) * driftAmp;
+      const dy = Math.cos(time * f2 + p2) * driftAmp;
+      m.set(n.id, {
+        x: cx + (n.x ?? 0) * scale + dx,
+        y: cy + (n.y ?? 0) * scale + dy,
+      });
+    });
     return m;
-  }, [nodes, viewport.w, viewport.h]);
+  }, [nodes, viewport.w, viewport.h, time]);
 
   // hover edge set
   const hoverNeighbors = useMemo(() => {
@@ -203,23 +232,31 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
             if (!a || !b) return null;
             const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
             const dim = hoverId && !involved;
+            // semantic edges flow; explicit pulse; temporal static
+            const isFlow  = e.kind === "semantic" || e.kind === "explicit";
+            const dashLen = 14;
+            const offset  = isFlow ? -((time * 22) % (dashLen*2)) : 0;
+            const pulse   = 0.85 + 0.15 * Math.sin(time * 1.2 + i);
             return (
               <line key={i}
                 x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                 stroke={EDGE_COLORS[e.kind] || "rgba(255,255,255,0.12)"}
-                strokeWidth={(0.5 + 1.8*e.weight) * (involved ? 1.8 : 1)}
-                opacity={dim ? 0.08 : 1}
-                style={{ transition:"opacity 0.15s, stroke-width 0.15s" }}
+                strokeWidth={(0.5 + 1.8*e.weight) * (involved ? 1.9 : 1)}
+                strokeDasharray={isFlow ? `${dashLen*0.6} ${dashLen*0.4}` : undefined}
+                strokeDashoffset={offset}
+                opacity={(dim ? 0.06 : 1) * (involved ? 1 : pulse)}
               />
             );
           })}
 
-          {/* node glow halos */}
+          {/* node glow halos (breathing) */}
           {nodes.map(n => {
             const p = nodePos.get(n.id);
             if (!p) return null;
             const sz = sizeFor(n);
-            const halo = sz * 3.5;
+            const seed = hashId(n.id);
+            const breath = 1 + 0.18 * Math.sin(time * 0.9 + seed * 0.011);
+            const halo = sz * 3.5 * breath;
             const dim = hoverId && !hoverNeighbors?.has(n.id);
             return (
               <circle key={`h-${n.id}`}
@@ -227,7 +264,6 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
                 fill={heatMode ? colorFor(n) : `url(#glow-${n.kind || "episode"})`}
                 opacity={dim ? 0.05 : (heatMode ? 0.18 : 0.5)}
                 pointerEvents="none"
-                style={{ transition:"opacity 0.15s" }}
               />
             );
           })}
