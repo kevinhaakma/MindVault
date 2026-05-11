@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -85,9 +86,17 @@ def embed(texts: list[str]) -> Optional[np.ndarray]:
 
 
 # --- storage ---
+BACKUP_DIR  = DATA_DIR / "backups"
+BACKUP_KEEP = 14         # daily backups retained
+BACKUP_INTERVAL = 86400  # seconds
+
+
 def _init_sqlite() -> sqlite3.Connection:
     conn = sqlite3.connect(str(SQLITE_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # WAL so backups can run while writes happen
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS memories (
             id           TEXT PRIMARY KEY,
@@ -141,9 +150,56 @@ async def startup():
         log.info("Initialising SQLite at %s", SQLITE_PATH)
         sql = _init_sqlite()
         log.info("SQLite ready.")
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=_backup_worker, daemon=True).start()
+        log.info("Backup worker started — daily snapshots to %s", BACKUP_DIR)
     except Exception as exc:
         _init_error = f"SQLite init failed: {exc}"
         log.error(_init_error)
+
+
+# --- backup ---
+def _do_backup() -> dict:
+    """Atomic SQLite snapshot. Safe to run while writes are in progress (WAL)."""
+    if sql is None:
+        raise RuntimeError("sql not initialised")
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dst = BACKUP_DIR / f"graph-{ts}.db"
+    dst_conn = sqlite3.connect(str(dst))
+    try:
+        sql.backup(dst_conn)
+    finally:
+        dst_conn.close()
+    # prune
+    backups = sorted(BACKUP_DIR.glob("graph-*.db"))
+    pruned = []
+    for old in backups[:-BACKUP_KEEP]:
+        try:
+            old.unlink()
+            pruned.append(old.name)
+        except Exception:
+            pass
+    return {
+        "name": dst.name,
+        "size": dst.stat().st_size,
+        "timestamp": ts,
+        "pruned": pruned,
+        "kept": min(len(backups), BACKUP_KEEP),
+    }
+
+
+def _backup_worker():
+    """Daily snapshot loop. First snapshot 5 min after boot."""
+    time.sleep(300)
+    while True:
+        try:
+            r = _do_backup()
+            log.info("daily backup: %s (%d bytes, pruned %d, kept %d)",
+                     r["name"], r["size"], len(r["pruned"]), r["kept"])
+        except Exception as exc:
+            log.error("backup failed: %s", exc)
+        time.sleep(BACKUP_INTERVAL)
 
 
 def _require_db():
@@ -232,7 +288,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.17"
+VERSION = "0.1.18"
 
 
 @router.get("/health")
@@ -248,6 +304,26 @@ def health():
 @router.get("/version")
 def version():
     return {"version": VERSION}
+
+
+@router.post("/backup")
+def backup_now():
+    _require_db()
+    try:
+        return _do_backup()
+    except Exception as exc:
+        raise HTTPException(500, f"Backup failed: {exc}")
+
+
+@router.get("/backups")
+def list_backups():
+    if not BACKUP_DIR.exists():
+        return {"backups": [], "dir": str(BACKUP_DIR)}
+    items = []
+    for p in sorted(BACKUP_DIR.glob("graph-*.db"), reverse=True):
+        st = p.stat()
+        items.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
+    return {"backups": items, "dir": str(BACKUP_DIR), "keep": BACKUP_KEEP}
 
 
 @router.post("/write")
