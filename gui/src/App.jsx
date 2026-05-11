@@ -255,16 +255,13 @@ export default function App() {
 function GraphCanvas({ onNodeClick }) {
   const cosmographRef = useCosmographRef();
 
-  useEffect(() => {
-    const t = setTimeout(() => {
-      cosmographRef.current?.fitView();
-    }, 300);
-    return () => clearTimeout(t);
-  });
+  const handleInit = () => {
+    // DuckDB ready — now safe to fitView
+    setTimeout(() => cosmographRef.current?.fitView(), 200);
+  };
 
   return (
     <Cosmograph
-      ref={cosmographRef}
       style={{ position: "absolute", inset: 0 }}
       backgroundColor="#0a0a12"
       nodeColor={(n) => n.color}
@@ -276,6 +273,7 @@ function GraphCanvas({ onNodeClick }) {
       simulationFriction={0.85}
       simulationLinkSpring={0.4}
       simulationRepulsion={0.6}
+      onInitialized={handleInit}
       onNodeClick={onNodeClick}
     />
   );
