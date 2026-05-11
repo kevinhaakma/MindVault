@@ -46,24 +46,29 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="recall",
             description=(
-                "Ask Vex what he remembers about this project. Cheap — call it before "
-                "re-deriving anything. He cross-checks his keyword index first, then the "
-                "vector archive if the index comes up thin. If he finds it, he'll tell you. "
-                "If he doesn't, you'll know immediately and can proceed without wasted tokens."
+                "Ask Vex what he remembers. Smart hybrid retrieval: he combines keyword "
+                "(bm25) + semantic (embedding cosine) + recency + recall-frequency into a "
+                "single relevance score. Set include_neighbors=true to also pull 1-hop "
+                "graph neighbors of the top hits — gives you the surrounding cluster, not "
+                "just the direct match. Cheap — call it often."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "What you want to remember. Keywords or natural language. "
-                                       "Vex handles both.",
+                        "description": "What you want to remember. Keywords or natural language.",
                     },
                     "project": {
                         "type": "string",
                         "description": "Project name. Omit and Vex detects from the current git repo.",
                     },
                     "limit": {"type": "integer", "default": 5},
+                    "include_neighbors": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, expand top hits with edge-connected memories.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -144,9 +149,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
         if name == "recall":
             payload = {
-                "query":   arguments["query"],
-                "project": arguments.get("project") or _detect_project(),
-                "limit":   arguments.get("limit", 5),
+                "query":             arguments["query"],
+                "project":           arguments.get("project") or _detect_project(),
+                "limit":             arguments.get("limit", 5),
+                "mode":              "smart",
+                "include_neighbors": arguments.get("include_neighbors", False),
             }
             data = await _http("POST", "/recall", json=payload)
             if not data["results"]:
@@ -156,8 +163,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 )]
             lines = [f"Vex found {len(data['results'])} record(s):"]
             for r in data["results"]:
-                tags = f" [{r['tags']}]" if r.get("tags") else ""
-                lines.append(f"  ({r['id'][:8]}) {r['kind']}{tags}: {r['content']}")
+                tags  = f" [{r['tags']}]" if r.get("tags") else ""
+                via   = " (related)" if r.get("via") == "neighbor" else ""
+                score = f" score={r['score']:.2f}" if isinstance(r.get("score"), (int, float)) else ""
+                lines.append(f"  ({r['id'][:8]}){via} {r['kind']}{tags}{score}: {r['content']}")
             return [TextContent(type="text", text="\n".join(lines))]
 
         if name == "remember":
