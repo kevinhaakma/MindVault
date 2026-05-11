@@ -10,6 +10,7 @@ Three-tier memory:
 Graph: edges from (a) cosine sim > 0.75, (b) temporal proximity, (c) explicit tags.
 Secrets: regex-scanned at write time, refused with 400.
 """
+import logging
 import os
 import re
 import sqlite3
@@ -19,14 +20,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-import lancedb
 import numpy as np
-import pyarrow as pa
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastembed import TextEmbedding
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sklearn.decomposition import PCA
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("mindvault")
 
 # --- config ---
 DATA_DIR = Path(os.environ.get("MINDVAULT_DIR", Path.home() / ".mindvault"))
@@ -36,6 +38,9 @@ SQLITE_PATH = DATA_DIR / "graph.db"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 SIM_EDGE_THRESHOLD = 0.75
+
+# fastembed caches model weights; point it at /data so it persists across restarts
+os.environ.setdefault("FASTEMBED_CACHE_PATH", str(DATA_DIR / ".cache"))
 
 # --- secret patterns Vex refuses to file ---
 SECRET_PATTERNS = [
@@ -57,20 +62,25 @@ def contains_secret(text: str) -> Optional[str]:
     return None
 
 
-# --- lazy embedder (~130 MB, init on first use) ---
-_embedder: Optional[TextEmbedding] = None
+# --- lazy globals (initialized in startup event) ---
+_embedder = None
+sql: Optional[sqlite3.Connection] = None
+vec_table = None
+_init_error: Optional[str] = None
 
 
 def embed(texts: list[str]) -> np.ndarray:
     global _embedder
     if _embedder is None:
+        from fastembed import TextEmbedding
+        log.info("Loading embedding model %s ...", EMBED_MODEL)
         _embedder = TextEmbedding(model_name=EMBED_MODEL)
+        log.info("Embedding model ready.")
     return np.array(list(_embedder.embed(texts)), dtype=np.float32)
 
 
-# --- storage init ---
 def _init_sqlite() -> sqlite3.Connection:
-    conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+    conn = sqlite3.connect(str(SQLITE_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS memories (
@@ -103,6 +113,8 @@ def _init_sqlite() -> sqlite3.Connection:
 
 
 def _init_lance():
+    import lancedb
+    import pyarrow as pa
     db = lancedb.connect(str(LANCE_PATH))
     if "memories" not in db.table_names():
         schema = pa.schema([
@@ -115,8 +127,41 @@ def _init_lance():
     return db.open_table("memories")
 
 
-sql       = _init_sqlite()
-vec_table = _init_lance()
+# --- app ---
+app    = FastAPI(title="MindVault")
+router = APIRouter()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup():
+    global sql, vec_table, _init_error
+    try:
+        log.info("Initialising SQLite at %s", SQLITE_PATH)
+        sql = _init_sqlite()
+        log.info("SQLite ready.")
+    except Exception as exc:
+        _init_error = f"SQLite init failed: {exc}"
+        log.error(_init_error)
+        return
+    try:
+        log.info("Initialising LanceDB at %s", LANCE_PATH)
+        vec_table = _init_lance()
+        log.info("LanceDB ready.")
+    except Exception as exc:
+        _init_error = f"LanceDB init failed: {exc}"
+        log.error(_init_error)
+
+
+def _require_db():
+    if sql is None or vec_table is None:
+        raise HTTPException(503, f"Storage not ready. {_init_error or 'Initialising...'}")
 
 
 @contextmanager
@@ -133,16 +178,16 @@ def tx():
 class WriteRequest(BaseModel):
     content:    str
     project:    str        = "default"
-    kind:       str        = "episode"   # episode | lesson | decision | reference
+    kind:       str        = "episode"
     tags:       list[str]  = []
-    related_to: list[str]  = []          # explicit edge targets
+    related_to: list[str]  = []
 
 
 class RecallRequest(BaseModel):
     query:   str
     project: Optional[str] = None
     limit:   int           = 5
-    mode:    str           = "auto"      # auto | keyword | semantic
+    mode:    str           = "auto"
 
 
 # --- graph helpers ---
@@ -156,7 +201,6 @@ def _add_edge(src: str, dst: str, kind: str, weight: float):
 
 
 def _auto_link(mem_id: str, vector: np.ndarray, project: str):
-    """kNN in the project; add semantic edges above threshold."""
     if vec_table.count_rows() < 2:
         return
     results = (
@@ -168,25 +212,21 @@ def _auto_link(mem_id: str, vector: np.ndarray, project: str):
     for r in results:
         if r["id"] == mem_id:
             continue
-        # LanceDB returns L2 distance on normalized vectors; cos_sim ≈ 1 - dist/2
         sim = 1.0 - (r.get("_distance", 2.0) / 2.0)
         if sim >= SIM_EDGE_THRESHOLD:
             _add_edge(mem_id, r["id"], "semantic", float(sim))
             _add_edge(r["id"], mem_id, "semantic", float(sim))
 
 
-# --- app ---
-app = FastAPI(title="MindVault")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- routes ---
+@router.get("/health")
+def health():
+    return {"status": "ok" if (sql and vec_table) else "initialising", "error": _init_error}
 
 
-@app.post("/write")
+@router.post("/write")
 def write(req: WriteRequest):
+    _require_db()
     leak = contains_secret(req.content)
     if leak:
         raise HTTPException(
@@ -217,7 +257,6 @@ def write(req: WriteRequest):
             _add_edge(mem_id, other_id, "explicit", 1.0)
             _add_edge(other_id, mem_id, "explicit", 1.0)
 
-        # temporal chain to previous memory in same project
         prev = c.execute(
             "SELECT id FROM memories WHERE project = ? AND id != ? "
             "ORDER BY created_at DESC LIMIT 1",
@@ -237,8 +276,9 @@ def write(req: WriteRequest):
     return {"id": mem_id, "created_at": now}
 
 
-@app.post("/recall")
+@router.post("/recall")
 def recall(req: RecallRequest):
+    _require_db()
     results = []
 
     if req.mode in ("auto", "keyword"):
@@ -290,8 +330,10 @@ def recall(req: RecallRequest):
     return {"results": results[:req.limit]}
 
 
-@app.get("/graph")
+@router.get("/graph")
 def graph(project: Optional[str] = None, limit: int = 1000):
+    _require_db()
+    from sklearn.decomposition import PCA
     where  = "WHERE project = ?" if project else ""
     params = ([project] if project else []) + [limit]
     rows   = sql.execute(
@@ -334,18 +376,19 @@ def graph(project: Optional[str] = None, limit: int = 1000):
     return {"nodes": nodes, "edges": [dict(e) for e in edge_rows]}
 
 
-@app.get("/memory/{mem_id}")
+@router.get("/memory/{mem_id}")
 def get_memory(mem_id: str):
+    _require_db()
     row = sql.execute("SELECT * FROM memories WHERE id = ?", (mem_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Vex has no record of that id.")
     return dict(row)
 
 
-@app.delete("/memory/{mem_id}")
+@router.delete("/memory/{mem_id}")
 def delete_memory(mem_id: str):
+    _require_db()
     with tx() as c:
-        # get rowid before deleting the base row (FTS content table needs it)
         rowid_row = c.execute(
             "SELECT rowid FROM memories WHERE id = ?", (mem_id,)
         ).fetchone()
@@ -360,9 +403,9 @@ def delete_memory(mem_id: str):
     return {"deleted": mem_id}
 
 
-@app.post("/prune-orphans")
+@router.post("/prune-orphans")
 def prune_orphans(project: Optional[str] = None):
-    """Delete nodes with no edges and zero recalls — likely noise."""
+    _require_db()
     where  = "AND project = ?" if project else ""
     params = [project] if project else []
     rows   = sql.execute(
@@ -377,14 +420,32 @@ def prune_orphans(project: Optional[str] = None):
     return {"deleted": deleted, "count": len(deleted)}
 
 
-@app.get("/stats")
+@router.get("/stats")
 def stats():
+    _require_db()
     total    = sql.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
     edge_ct  = sql.execute("SELECT COUNT(*) as c FROM edges").fetchone()["c"]
     projects = [dict(r) for r in sql.execute(
         "SELECT project, COUNT(*) as count FROM memories GROUP BY project ORDER BY count DESC"
     ).fetchall()]
     return {"memories": total, "edges": edge_ct, "projects": projects}
+
+
+# Mount routes at both / (local dev via vite proxy) and /api/ (production)
+app.include_router(router)
+app.include_router(router, prefix="/api")
+
+# Static GUI serving
+STATIC_DIR = os.environ.get("MINDVAULT_STATIC")
+if STATIC_DIR and Path(STATIC_DIR).exists():
+    _static = Path(STATIC_DIR)
+    assets_dir = _static / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        return FileResponse(str(_static / "index.html"))
 
 
 if __name__ == "__main__":
