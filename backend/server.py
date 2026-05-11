@@ -227,10 +227,11 @@ class WriteRequest(BaseModel):
 
 
 class RecallRequest(BaseModel):
-    query:   str
-    project: Optional[str] = None
-    limit:   int           = 5
-    mode:    str           = "auto"
+    query:             str
+    project:           Optional[str] = None
+    limit:             int           = 5
+    mode:              str           = "auto"   # auto|keyword|semantic|smart
+    include_neighbors: bool          = False    # expand top hits with 1-hop edges
 
 
 # --- vector helpers (pure SQLite + numpy, no lancedb) ---
@@ -288,7 +289,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.18"
+VERSION = "0.1.19"
 
 
 @router.get("/health")
@@ -375,56 +376,146 @@ def write(req: WriteRequest):
     return {"id": mem_id, "created_at": now}
 
 
-@router.post("/recall")
-def recall(req: RecallRequest):
-    _require_db()
-    results = []
-
-    if req.mode in ("auto", "keyword"):
-        proj_filter = "AND m.project = ?" if req.project else ""
-        params: list = [req.query]
-        if req.project:
-            params.append(req.project)
-        params.append(req.limit)
+def _fts_search(query: str, project: Optional[str], limit: int) -> dict:
+    """Returns {id: (row_dict, bm25_score)}. Lower bm25 = better in SQLite, we negate."""
+    proj_filter = "AND m.project = ?" if project else ""
+    params: list = [query]
+    if project: params.append(project)
+    params.append(limit)
+    try:
         rows = sql.execute(
-            f"""SELECT m.id, m.content, m.project, m.kind, m.tags, m.created_at,
-                       bm25(memories_fts) AS score
+            f"""SELECT m.id, m.content, m.project, m.kind, m.tags, m.created_at, m.access_count,
+                       bm25(memories_fts) AS bm
                 FROM memories_fts
                 JOIN memories m ON m.rowid = memories_fts.rowid
                 WHERE memories_fts MATCH ? {proj_filter}
-                ORDER BY score LIMIT ?""",
+                ORDER BY bm LIMIT ?""",
             params,
         ).fetchall()
-        results = [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        # FTS5 syntax error (e.g. special chars in query) — fall back to LIKE
+        like = f"%{query}%"
+        params = [like, like]
+        if project:
+            params.append(project)
+        params.append(limit)
+        rows = sql.execute(
+            f"""SELECT id, content, project, kind, tags, created_at, access_count, 0.0 AS bm
+                FROM memories
+                WHERE (content LIKE ? OR tags LIKE ?) {('AND project = ?' if project else '')}
+                ORDER BY created_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+    out = {}
+    for r in rows:
+        d = dict(r); bm = d.pop("bm", 0.0)
+        out[d["id"]] = (d, -float(bm))   # higher = better
+    return out
 
-    if req.mode == "semantic" or (req.mode == "auto" and len(results) < req.limit):
-        qvecs = embed([req.query])
-        if qvecs is not None:
-            qv = qvecs[0]
-            qv = qv / (np.linalg.norm(qv) + 1e-9)
-            seen = {r["id"] for r in results}
-            for hit in _cosine_search(qv, req.project, req.limit * 2):
-                if hit["id"] in seen:
-                    continue
-                row = sql.execute(
-                    "SELECT id, content, project, kind, tags, created_at FROM memories WHERE id = ?",
-                    (hit["id"],),
-                ).fetchone()
-                if row:
-                    d = dict(row)
-                    d["score"] = hit["score"]
-                    results.append(d)
-                if len(results) >= req.limit:
-                    break
 
+def _semantic_search(query: str, project: Optional[str], limit: int) -> dict:
+    """Returns {id: cosine_score}."""
+    qvecs = embed([query])
+    if qvecs is None:
+        return {}
+    qv = qvecs[0]
+    qv = qv / (np.linalg.norm(qv) + 1e-9)
+    return {h["id"]: h["score"] for h in _cosine_search(qv, project, limit)}
+
+
+def _fetch_row(mid: str) -> Optional[dict]:
+    row = sql.execute(
+        "SELECT id, content, project, kind, tags, created_at, access_count FROM memories WHERE id = ?",
+        (mid,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _expand_neighbors(seed_ids: list[str], limit: int, exclude: set) -> list[dict]:
+    """1-hop edge expansion. Returns added rows ordered by edge weight."""
+    if not seed_ids: return []
+    placeholders = ",".join("?" * len(seed_ids))
+    edges = sql.execute(
+        f"""SELECT dst, MAX(weight) AS w
+            FROM edges WHERE src IN ({placeholders})
+            GROUP BY dst ORDER BY w DESC LIMIT ?""",
+        seed_ids + [limit * 3],
+    ).fetchall()
+    out = []
+    for e in edges:
+        if e["dst"] in exclude: continue
+        row = _fetch_row(e["dst"])
+        if row:
+            row["score"] = float(e["w"])
+            row["via"]   = "neighbor"
+            out.append(row)
+            exclude.add(e["dst"])
+        if len(out) >= limit: break
+    return out
+
+
+@router.post("/recall")
+def recall(req: RecallRequest):
+    _require_db()
     now = time.time()
-    for r in results[:req.limit]:
+
+    # ── fetch from both indexes ─────────────────────────────────────────────
+    over_fetch = max(req.limit * 3, 12)
+    fts_map = {}  # id → (row, score)
+    sem_map = {}  # id → score
+
+    if req.mode in ("auto", "keyword", "smart"):
+        fts_map = _fts_search(req.query, req.project, over_fetch)
+    if req.mode in ("auto", "semantic", "smart") or (req.mode == "auto" and len(fts_map) < req.limit):
+        sem_map = _semantic_search(req.query, req.project, over_fetch)
+
+    # ── hybrid scoring ──────────────────────────────────────────────────────
+    # Normalize FTS scores per-call (relative ranking only matters)
+    if fts_map:
+        max_fts = max(s for _, s in fts_map.values()) or 1.0
+        fts_norm = {mid: max(0.0, s / max_fts) for mid, (_, s) in fts_map.items()}
+    else:
+        fts_norm = {}
+
+    all_ids = set(fts_map) | set(sem_map)
+    scored: list[dict] = []
+    for mid in all_ids:
+        row = fts_map[mid][0] if mid in fts_map else _fetch_row(mid)
+        if not row: continue
+        f = fts_norm.get(mid, 0.0)         # 0..1
+        s = sem_map.get(mid, 0.0)          # cosine, typically 0..1
+        # take max of two retrieval signals (either route can prove relevance)
+        relevance = max(f * 0.85, s)
+        # 365-day exponential recency decay
+        age_days = (now - row["created_at"]) / 86400
+        recency  = 2.71828 ** (-age_days / 365)
+        # mild access boost (capped)
+        access   = 1.0 + min((row.get("access_count") or 0) / 20.0, 0.5)
+        final    = relevance * (0.65 + 0.35 * recency) * access
+        row["score"]     = round(final, 4)
+        row["_fts"]      = round(f, 4)
+        row["_sem"]      = round(s, 4)
+        row["_recency"]  = round(recency, 4)
+        scored.append(row)
+
+    scored.sort(key=lambda r: -r["score"])
+    results = scored[:req.limit]
+
+    # ── optional 1-hop neighbor expansion ───────────────────────────────────
+    if req.include_neighbors and results:
+        seen = {r["id"] for r in results}
+        top_seeds = [r["id"] for r in results[:3]]
+        neighbors = _expand_neighbors(top_seeds, req.limit, seen)
+        results.extend(neighbors)
+
+    # ── update access stats ─────────────────────────────────────────────────
+    for r in results:
         sql.execute(
             "UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
             (now, r["id"]),
         )
     sql.commit()
-    return {"results": results[:req.limit]}
+    return {"results": results}
 
 
 @router.get("/graph")
