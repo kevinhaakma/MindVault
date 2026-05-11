@@ -403,28 +403,62 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
             );
           })}
 
-          {/* hover label */}
-          {hoverId && (() => {
-            const n = nodes.find(x => x.id === hoverId);
-            const p = nodePos.get(hoverId);
-            if (!n || !p) return null;
-            return (
-              <g pointerEvents="none">
-                <text x={p.x} y={p.y - sizeFor(n) - 8}
-                  textAnchor="middle"
-                  fill="#fff"
-                  fontSize={12 / transform.k}
-                  fontFamily="Inter,sans-serif"
-                  fontWeight="600"
-                  style={{ paintOrder:"stroke", stroke:"#000", strokeWidth: 3/transform.k, strokeLinejoin:"round" }}
-                >
-                  {(n.preview || "").slice(0, 60)}{(n.preview||"").length>60?"…":""}
-                </text>
-              </g>
-            );
-          })()}
         </g>
       </svg>
+
+      {/* hover card — floating, top-left, full info */}
+      {hoverId && (() => {
+        const n = nodes.find(x => x.id === hoverId);
+        if (!n) return null;
+        return (
+          <div style={{
+            position:"absolute", top:16, left:16, maxWidth:380,
+            padding:"12px 14px", borderRadius:10, pointerEvents:"none",
+            background:"rgba(10,10,20,0.92)", backdropFilter:"blur(14px)",
+            border:`1px solid ${KIND_COLORS[n.kind] || "rgba(255,255,255,0.1)"}33`,
+            boxShadow:"0 10px 40px rgba(0,0,0,0.6)",
+            animation:"fadeIn 0.12s ease",
+          }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+              <span style={{
+                width:8, height:8, borderRadius:"50%", flexShrink:0,
+                background: KIND_COLORS[n.kind]||"#888",
+                boxShadow:`0 0 8px ${KIND_COLORS[n.kind]||"#888"}`,
+              }} />
+              <span style={{
+                fontSize:10, textTransform:"uppercase", letterSpacing:1.3,
+                color:KIND_COLORS[n.kind]||"#888", fontWeight:700,
+              }}>{n.kind}</span>
+              <span style={{ fontSize:10, color:"#444" }}>·</span>
+              <span style={{ fontSize:10, color:"#777" }}>{n.project}</span>
+              {n.access_count>0 && (
+                <>
+                  <span style={{ fontSize:10, color:"#444" }}>·</span>
+                  <span style={{ fontSize:10, color:"#999" }}>{n.access_count}×</span>
+                </>
+              )}
+            </div>
+            <div style={{ fontSize:12, lineHeight:1.55, color:"#d8d8f0" }}>
+              {n.preview}
+            </div>
+            {n.tags && (
+              <div style={{ marginTop:8, display:"flex", flexWrap:"wrap", gap:4 }}>
+                {n.tags.split(",").filter(Boolean).slice(0,6).map(t => (
+                  <span key={t} style={{
+                    fontSize:9, padding:"1px 6px", borderRadius:10,
+                    background:"rgba(255,255,255,0.04)", color:"#777",
+                    border:"1px solid rgba(255,255,255,0.05)",
+                  }}>{t}</span>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop:8, fontSize:9, color:"#444", display:"flex", gap:10 }}>
+              <span>{timeAgo((n.created_at||0)*1000)}</span>
+              <span>liveness {(livenessOf(n)*100).toFixed(0)}%</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* zoom controls */}
       <div style={{
@@ -752,6 +786,29 @@ export default function App() {
       .catch(() => {});
   }, [selected]);
 
+  // keyboard nav: '/' focus search, esc close, 1/2/3 views, 'f' fit
+  const searchRef = useRef(null);
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      const inField = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+      if (e.key === "Escape") {
+        if (selected || fullMemory) { setSelected(null); setFullMemory(null); }
+        else if (search) setSearch("");
+        else if (inField) t.blur();
+        return;
+      }
+      if (inField) return;
+      if (e.key === "/") { e.preventDefault(); searchRef.current?.focus(); }
+      else if (e.key === "1") setView("constellation");
+      else if (e.key === "2") setView("archive");
+      else if (e.key === "3") setView("file");
+      else if (e.key === "r" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); refresh(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, fullMemory, search, refresh]);
+
   // filter pipeline
   const timeFiltered = useMemo(() => {
     if (!graph.nodes.length) return graph;
@@ -926,15 +983,35 @@ export default function App() {
         {view !== "file" && (
           <div style={{ position:"relative" }}>
             <input
+              ref={searchRef}
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search memories…"
-              style={{ ...inputStyle, paddingLeft:30 }}
+              placeholder="Search memories…  ( / )"
+              style={{ ...inputStyle, paddingLeft:30, paddingRight: search ? 28 : 11 }}
             />
+            {search && (
+              <button
+                onClick={() => setSearch("")}
+                style={{
+                  position:"absolute", right:6, top:"50%", transform:"translateY(-50%)",
+                  background:"none", border:"none", color:"#666", cursor:"pointer",
+                  fontSize:14, padding:"4px 6px", lineHeight:1,
+                }}
+                title="Clear (Esc)"
+              >×</button>
+            )}
             <span style={{
               position:"absolute", left:10, top:"50%", transform:"translateY(-50%)",
               fontSize:13, color:"#444", pointerEvents:"none"
             }}>⌕</span>
+          </div>
+        )}
+
+        {/* Search status — only when searching */}
+        {view !== "file" && search && (
+          <div style={{ marginTop:-10, fontSize:10, color:"#555", lineHeight:1.5 }}>
+            {visible.nodes.length} match{visible.nodes.length===1?"":"es"}
+            {smartResults ? ` · ${Object.keys(smartResults).length} semantic` : " · keyword only"}
           </div>
         )}
 
@@ -975,7 +1052,15 @@ export default function App() {
 
         {/* Actions */}
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-          <SBtn onClick={refresh}>↺ Refresh now</SBtn>
+          <SBtn onClick={refresh}>
+            <span style={{
+              display:"inline-block",
+              animation: refreshing ? "spin 0.8s linear infinite" : "none",
+              transformOrigin: "center",
+            }}>↺</span>
+            {" "}
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </SBtn>
           <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:11, color:"#777", cursor:"pointer", padding:"4px 2px" }}>
             <input type="checkbox" checked={autoRefresh}
               onChange={e => setAutoRefresh(e.target.checked)}
@@ -1000,6 +1085,14 @@ export default function App() {
             {vexMood==="thumbsup" && <span style={{color:"#7ee787"}}>Filed.</span>}
             {vexMood==="frown"    && <span style={{color:"#ff6b6b"}}>Something off.</span>}
             {vexMood==="neutral"  && "Vex is watching."}
+          </div>
+          <div style={{
+            marginTop:8, fontSize:9, color:"#444", textAlign:"center", lineHeight:1.7,
+            display:"flex", flexWrap:"wrap", justifyContent:"center", gap:6,
+          }}>
+            <span><span className="kbd">/</span> search</span>
+            <span><span className="kbd">1·2·3</span> views</span>
+            <span><span className="kbd">esc</span> close</span>
           </div>
         </div>
       </aside>
@@ -1038,15 +1131,31 @@ export default function App() {
           />
         )}
 
+        {/* Click-outside scrim — only when detail open */}
+        {fullMemory && (
+          <div
+            onClick={() => { setSelected(null); setFullMemory(null); }}
+            style={{
+              position:"absolute", inset:0, zIndex:9,
+              background:"rgba(0,0,0,0.15)",
+              animation:"fadeIn 0.18s ease",
+            }}
+          />
+        )}
+
         {/* Detail panel */}
         {fullMemory && (
-          <div style={{
-            position:"absolute", right:20, top:20, width:360, maxHeight:"calc(100vh - 40px)",
-            overflowY:"auto", padding:18,
-            background:"rgba(10,10,20,0.96)", border:"1px solid rgba(91,157,255,0.25)",
-            borderRadius:12, backdropFilter:"blur(18px)",
-            boxShadow:"0 12px 48px rgba(0,0,0,0.7)", zIndex:10,
-          }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position:"absolute", right:20, top:20, width:380, maxHeight:"calc(100vh - 40px)",
+              overflowY:"auto", padding:20,
+              background:"rgba(10,10,20,0.97)",
+              border:`1px solid ${KIND_COLORS[fullMemory.kind]||"#5b9dff"}33`,
+              borderRadius:14, backdropFilter:"blur(20px)",
+              boxShadow:"0 16px 56px rgba(0,0,0,0.75)", zIndex:10,
+              animation:"slideIn 0.22s cubic-bezier(.2,.8,.2,1)",
+            }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
               <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                 <span style={{
@@ -1136,6 +1245,28 @@ export default function App() {
           0%,100% { opacity:1; transform:scale(1); }
           50%     { opacity:0.3; transform:scale(1.5); }
         }
+        @keyframes fadeIn {
+          from { opacity:0; }
+          to   { opacity:1; }
+        }
+        @keyframes slideIn {
+          from { opacity:0; transform: translateX(20px); }
+          to   { opacity:1; transform: translateX(0); }
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        .kbd {
+          display: inline-block;
+          padding: 1px 5px;
+          font-family: ui-monospace, Menlo, monospace;
+          font-size: 9px;
+          color: #888;
+          background: rgba(255,255,255,0.04);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 3px;
+        }
+        button:hover { filter: brightness(1.15); }
         ::-webkit-scrollbar { width:6px; height:6px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:#1e1e32; border-radius:4px; }
