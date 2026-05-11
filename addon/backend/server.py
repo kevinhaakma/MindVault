@@ -232,13 +232,22 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
+VERSION = "0.1.14"
+
+
 @router.get("/health")
 def health():
     return {
         "status": "ok" if sql else "initialising",
         "embed": _embed_available,
         "error": _init_error,
+        "version": VERSION,
     }
+
+
+@router.get("/version")
+def version():
+    return {"version": VERSION}
 
 
 @router.post("/write")
