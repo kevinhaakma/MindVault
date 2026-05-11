@@ -1,0 +1,36 @@
+name: "MindVault"
+description: >
+  Vex — persistent memory + knowledge graph for code agents.
+  Stores memories in SQLite + vector embeddings, visualizes them as a constellation.
+  Exposes recall/remember/get_secret via MCP for Claude Code and other agents.
+version: "0.1.0"
+slug: "mindvault"
+url: "https://github.com/kevhaakma/mindvault"
+init: false
+
+# Tell Supervisor to build from repo root so the Dockerfile can COPY gui/ and backend/
+# (HA Supervisor uses the add-on directory as context by default; this overrides it)
+build: true
+
+arch:
+  - aarch64
+  - amd64
+
+startup: application
+boot: auto
+
+# port 80  → GUI  (nginx, mapped to host 7653)
+# port 8765 → API  (uvicorn, mapped to host 8765 for MCP clients)
+ports:
+  80/tcp: 7653
+  8765/tcp: 8765
+
+ports_description:
+  80/tcp: "MindVault GUI"
+  8765/tcp: "MindVault API (MCP clients connect here)"
+
+map:
+  - data:rw
+
+options: {}
+schema: {}

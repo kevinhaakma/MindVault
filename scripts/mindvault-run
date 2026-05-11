@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# mindvault-run — execute a command with Vex's loaded secrets in the environment.
+#
+# Vex writes secrets to ~/.mindvault/session.env (chmod 0600) when you call
+# the get_secret MCP tool. This wrapper sources that file so the child process
+# can read them as environment variables. The values are never echoed or logged.
+#
+# Usage:
+#   mindvault-run <command> [args...]
+#
+# Example:
+#   mindvault-run python deploy.py   # $MINDVAULT_SECRET_OPENAI_KEY is in env
+set -euo pipefail
+
+ENV_FILE="${HOME}/.mindvault/session.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+    # export all variables declared in the file
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+exec "$@"

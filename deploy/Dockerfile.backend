@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# fastembed downloads the model on first run; cache the pip install layer separately
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY server.py .
+
+# Data volume mount point
+VOLUME ["/root/.mindvault"]
+
+EXPOSE 8765
+
+# Override host to 0.0.0.0 — Docker port binding handles the Tailscale restriction
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8765"]

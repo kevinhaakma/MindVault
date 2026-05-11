@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# fastembed model cache
+.cache/
+
+# MindVault data (never commit memories or secrets)
+.mindvault/
+session.env
+
+# Node
+node_modules/
+dist/
+.npm/
+
+# Vite
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Secrets
+*.env
+!.env.example

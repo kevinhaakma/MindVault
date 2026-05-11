@@ -1,0 +1,27 @@
+services:
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile.backend
+    volumes:
+      - mindvault_data:/root/.mindvault
+    ports:
+      # Exposed on Tailscale interface so MCP clients on other machines can reach it
+      - "${TAILSCALE_IP}:8765:8765"
+    restart: unless-stopped
+
+  gui:
+    build:
+      context: ../           # repo root (needs gui/ and deploy/ both)
+      dockerfile: deploy/Dockerfile.gui
+    ports:
+      # Bind ONLY to the Tailscale interface — not LAN, not WAN
+      - "${TAILSCALE_IP}:80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  mindvault_data:
+    # Data persists across container rebuilds at /var/lib/docker/volumes/…
