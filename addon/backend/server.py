@@ -22,8 +22,10 @@ from typing import Optional
 import lancedb
 import numpy as np
 import pyarrow as pa
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastembed import TextEmbedding
 from pydantic import BaseModel
 from sklearn.decomposition import PCA
@@ -176,7 +178,9 @@ def _auto_link(mem_id: str, vector: np.ndarray, project: str):
 
 
 # --- app ---
-app = FastAPI(title="MindVault")
+app    = FastAPI(title="MindVault")
+router = APIRouter()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -185,7 +189,7 @@ app.add_middleware(
 )
 
 
-@app.post("/write")
+@router.post("/write")
 def write(req: WriteRequest):
     leak = contains_secret(req.content)
     if leak:
@@ -237,7 +241,7 @@ def write(req: WriteRequest):
     return {"id": mem_id, "created_at": now}
 
 
-@app.post("/recall")
+@router.post("/recall")
 def recall(req: RecallRequest):
     results = []
 
@@ -290,7 +294,7 @@ def recall(req: RecallRequest):
     return {"results": results[:req.limit]}
 
 
-@app.get("/graph")
+@router.get("/graph")
 def graph(project: Optional[str] = None, limit: int = 1000):
     where  = "WHERE project = ?" if project else ""
     params = ([project] if project else []) + [limit]
@@ -334,7 +338,7 @@ def graph(project: Optional[str] = None, limit: int = 1000):
     return {"nodes": nodes, "edges": [dict(e) for e in edge_rows]}
 
 
-@app.get("/memory/{mem_id}")
+@router.get("/memory/{mem_id}")
 def get_memory(mem_id: str):
     row = sql.execute("SELECT * FROM memories WHERE id = ?", (mem_id,)).fetchone()
     if not row:
@@ -342,7 +346,7 @@ def get_memory(mem_id: str):
     return dict(row)
 
 
-@app.delete("/memory/{mem_id}")
+@router.delete("/memory/{mem_id}")
 def delete_memory(mem_id: str):
     with tx() as c:
         # get rowid before deleting the base row (FTS content table needs it)
@@ -360,7 +364,7 @@ def delete_memory(mem_id: str):
     return {"deleted": mem_id}
 
 
-@app.post("/prune-orphans")
+@router.post("/prune-orphans")
 def prune_orphans(project: Optional[str] = None):
     """Delete nodes with no edges and zero recalls — likely noise."""
     where  = "AND project = ?" if project else ""
@@ -377,7 +381,7 @@ def prune_orphans(project: Optional[str] = None):
     return {"deleted": deleted, "count": len(deleted)}
 
 
-@app.get("/stats")
+@router.get("/stats")
 def stats():
     total    = sql.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
     edge_ct  = sql.execute("SELECT COUNT(*) as c FROM edges").fetchone()["c"]
@@ -385,6 +389,23 @@ def stats():
         "SELECT project, COUNT(*) as count FROM memories GROUP BY project ORDER BY count DESC"
     ).fetchall()]
     return {"memories": total, "edges": edge_ct, "projects": projects}
+
+
+# Mount routes at both / (local dev via vite proxy) and /api/ (production)
+app.include_router(router)
+app.include_router(router, prefix="/api")
+
+# Optional static GUI serving — set MINDVAULT_STATIC to the built dist/ path
+STATIC_DIR = os.environ.get("MINDVAULT_STATIC")
+if STATIC_DIR and Path(STATIC_DIR).exists():
+    _static = Path(STATIC_DIR)
+    assets_dir = _static / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        return FileResponse(str(_static / "index.html"))
 
 
 if __name__ == "__main__":
