@@ -80,8 +80,17 @@ function hashId(s) {
   return h;
 }
 
+// liveness: 1.0 = fresh+recalled, ~0.25 = stale untouched
+function livenessOf(n) {
+  const now = Date.now() / 1000;
+  const ageDays = Math.max(0, (now - (n.created_at || 0)) / 86400);
+  const staleness = Math.min(1, ageDays / 180);
+  const accessBoost = Math.min(1, (n.access_count || 0) / 6);
+  return Math.max(0.25, 1 - staleness * 0.7 + accessBoost * 0.4);
+}
+
 // ── Constellation (force-directed SVG graph) ────────────────────────────────
-function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId, hoverId, setHoverId }) {
+function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId, hoverId, setHoverId, matchIds }) {
   const wrapRef = useRef(null);
   const [viewport, setViewport] = useState({ w: 1000, h: 800 });
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
@@ -327,7 +336,7 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
             );
           })}
 
-          {/* node glow halos (breathing) */}
+          {/* node glow halos (breathing, liveness-tinted) */}
           {nodes.map(n => {
             const p = nodePos.get(n.id);
             if (!p) return null;
@@ -335,12 +344,16 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
             const seed = hashId(n.id);
             const breath = 1 + 0.18 * Math.sin(time * 0.9 + seed * 0.011);
             const halo = sz * 3.5 * breath;
+            const isMatch = matchIds?.has(n.id);
             const dim = hoverId && !hoverNeighbors?.has(n.id);
+            const live = heatMode ? 1 : livenessOf(n);
+            const baseAlpha = heatMode ? 0.18 : 0.5;
+            const matchBoost = isMatch ? 1.4 : 1;
             return (
               <circle key={`h-${n.id}`}
-                cx={p.x} cy={p.y} r={halo}
+                cx={p.x} cy={p.y} r={halo * matchBoost}
                 fill={heatMode ? colorFor(n) : `url(#glow-${n.kind || "episode"})`}
-                opacity={dim ? 0.05 : (heatMode ? 0.18 : 0.5)}
+                opacity={dim ? 0.05 : baseAlpha * live * matchBoost}
                 pointerEvents="none"
               />
             );
@@ -353,7 +366,12 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
             const sz = sizeFor(n);
             const isSel = selectedId === n.id;
             const isHover = hoverId === n.id;
+            const isMatch = matchIds?.has(n.id);
             const dim = hoverId && !hoverNeighbors?.has(n.id);
+            const live = heatMode ? 1 : livenessOf(n);
+            const seed = hashId(n.id);
+            // pulsing match ring
+            const matchPulse = isMatch ? (1 + 0.25 * Math.sin(time * 2.4 + seed)) : 1;
             return (
               <g key={n.id}
                 onMouseEnter={() => setHoverId(n.id)}
@@ -361,11 +379,22 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
                 onClick={(e) => { e.stopPropagation(); onSelect(n); }}
                 style={{ cursor:"pointer" }}
               >
+                {isMatch && (
+                  <circle
+                    cx={p.x} cy={p.y}
+                    r={sz * 2.2 * matchPulse}
+                    fill="none"
+                    stroke="#fff"
+                    strokeWidth={1.2}
+                    opacity={0.55 + 0.25 * Math.sin(time * 2.4 + seed)}
+                    pointerEvents="none"
+                  />
+                )}
                 <circle
                   cx={p.x} cy={p.y}
                   r={sz}
                   fill={colorFor(n)}
-                  opacity={dim ? 0.25 : 1}
+                  opacity={dim ? 0.2 : (0.4 + 0.6 * live)}
                   stroke={isSel ? "#fff" : (isHover ? "rgba(255,255,255,0.7)" : "none")}
                   strokeWidth={isSel ? 2 : 1.5}
                   style={{ transition:"opacity 0.15s, r 0.15s" }}
@@ -664,6 +693,7 @@ export default function App() {
   const [timeFilter,      setTimeFilter]      = useState(1.0);
   const [heatMode,        setHeatMode]        = useState(false);
   const [search,          setSearch]          = useState("");
+  const [smartResults,    setSmartResults]    = useState(null);  // {id → score} | null
   const [vexMood,         setVexMood]         = useState("neutral");
   const [hoverId,         setHoverId]         = useState(null);
   const [lastUpdated,     setLastUpdated]     = useState(null);
@@ -735,18 +765,59 @@ export default function App() {
     };
   }, [graph, timeFilter]);
 
+  // Debounced semantic search — kicks /api/recall when query is meaningful
+  useEffect(() => {
+    if (!search || search.length < 3) { setSmartResults(null); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch("/api/recall", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            query: search,
+            project: selectedProject || undefined,
+            mode: "smart",
+            limit: 20,
+            include_neighbors: false,
+          }),
+        }).then(r => r.json());
+        const m = {};
+        (r.results || []).forEach(it => { m[it.id] = it.score; });
+        setSmartResults(m);
+      } catch { setSmartResults(null); }
+    }, 220);
+    return () => clearTimeout(t);
+  }, [search, selectedProject]);
+
+  // visible = union of (smart hits) ∪ (substring matches), keep all edges within
   const visible = useMemo(() => {
     if (!search) return timeFiltered;
     const q = search.toLowerCase();
-    const okNodes = timeFiltered.nodes.filter(n =>
-      n.preview?.toLowerCase().includes(q) ||
-      n.tags?.toLowerCase().includes(q) ||
-      n.kind?.includes(q) ||
-      n.project?.toLowerCase().includes(q)
+    const subset = new Set(
+      timeFiltered.nodes
+        .filter(n =>
+          n.preview?.toLowerCase().includes(q) ||
+          n.tags?.toLowerCase().includes(q) ||
+          n.kind?.includes(q) ||
+          n.project?.toLowerCase().includes(q)
+        )
+        .map(n => n.id)
     );
+    if (smartResults) Object.keys(smartResults).forEach(id => subset.add(id));
+    const okNodes = timeFiltered.nodes.filter(n => subset.has(n.id));
     const okIds = new Set(okNodes.map(n => n.id));
     return { nodes: okNodes, edges: timeFiltered.edges.filter(e => okIds.has(e.src) && okIds.has(e.dst)) };
-  }, [timeFiltered, search]);
+  }, [timeFiltered, search, smartResults]);
+
+  // matchIds: IDs to visually highlight (semantic + literal substring matches)
+  const matchIds = useMemo(() => {
+    if (!search) return null;
+    const s = new Set(smartResults ? Object.keys(smartResults) : []);
+    const q = search.toLowerCase();
+    timeFiltered.nodes.forEach(n => {
+      if (n.preview?.toLowerCase().includes(q)) s.add(n.id);
+    });
+    return s.size ? s : null;
+  }, [search, smartResults, timeFiltered]);
 
   const maxAccess = useMemo(
     () => Math.max(1, ...visible.nodes.map(n => n.access_count||0)),
@@ -947,6 +1018,7 @@ export default function App() {
             selectedId={selected?.id}
             hoverId={hoverId}
             setHoverId={setHoverId}
+            matchIds={matchIds}
           />
         )}
 
@@ -1004,8 +1076,9 @@ export default function App() {
               fontSize:11, color:"#666", lineHeight:2, marginBottom:14,
             }}>
               <Row label="project"  value={fullMemory.project} />
-              <Row label="recalled" value={`${fullMemory.access_count||0}×`} />
-              <Row label="filed"    value={fmtDate(fullMemory.created_at)} />
+              <Row label="recalled" value={`${fullMemory.access_count||0}×${fullMemory.last_accessed ? ` · last ${timeAgo(fullMemory.last_accessed*1000)}` : ""}`} />
+              <Row label="filed"    value={`${fmtDate(fullMemory.created_at)} · ${timeAgo(fullMemory.created_at*1000)}`} />
+              <Row label="liveness" value={(livenessOf(fullMemory)*100).toFixed(0) + "%"} />
               {fullMemory.tags && (
                 <div style={{ marginTop:8 }}>
                   <div style={{ color:"#555", fontSize:10, textTransform:"uppercase", letterSpacing:1, marginBottom:4 }}>tags</div>
