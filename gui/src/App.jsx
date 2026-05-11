@@ -18,6 +18,7 @@ const EDGE_COLORS = {
   semantic: "rgba(120,160,255,0.55)",
   explicit: "rgba(255,180,100,0.85)",
   temporal: "rgba(255,255,255,0.18)",
+  cross:    "rgba(184,107,255,0.75)",  // bright purple — bridges projects
 };
 
 const VIEWS = ["constellation", "archive", "file"];
@@ -347,15 +348,17 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
             const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
             const dim = hoverId && !involved;
             // semantic edges flow; explicit pulse; temporal static
-            const isFlow  = e.kind === "semantic" || e.kind === "explicit";
-            const dashLen = 14;
-            const offset  = isFlow ? -((time * 22) % (dashLen*2)) : 0;
+            const isFlow  = e.kind === "semantic" || e.kind === "explicit" || e.kind === "cross";
+            const isCross = e.kind === "cross";
+            const dashLen = isCross ? 18 : 14;
+            const offset  = isFlow ? -((time * (isCross ? 16 : 22)) % (dashLen*2)) : 0;
             const pulse   = 0.85 + 0.15 * Math.sin(time * 1.2 + i);
+            const baseWidth = (isCross ? 0.8 + 1.5*e.weight : 0.5 + 1.8*e.weight);
             return (
               <line key={i}
                 x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                 stroke={EDGE_COLORS[e.kind] || "rgba(255,255,255,0.12)"}
-                strokeWidth={(0.5 + 1.8*e.weight) * (involved ? 1.9 : 1)}
+                strokeWidth={baseWidth * (involved ? 1.9 : 1)}
                 strokeDasharray={isFlow ? `${dashLen*0.6} ${dashLen*0.4}` : undefined}
                 strokeDashoffset={offset}
                 opacity={(dim ? 0.06 : 1) * (involved ? 1 : pulse)}
@@ -1383,6 +1386,20 @@ function Legend({ heatMode }) {
             </div>
           );
         })}
+        <div style={{ borderTop:"1px solid rgba(255,255,255,0.05)", marginTop:8, paddingTop:8 }}>
+          <div style={{ fontSize:9, color:"#444", textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Edges</div>
+          {[
+            ["semantic", "within project"],
+            ["cross",    "across projects"],
+            ["explicit", "manual link"],
+            ["temporal", "time-adjacent"],
+          ].map(([k, desc]) => (
+            <div key={k} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:3 }}>
+              <span style={{ width:18, height:2, background:EDGE_COLORS[k], flexShrink:0, borderRadius:1 }} />
+              <span style={{ fontSize:10, color:"#888" }}>{desc}</span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

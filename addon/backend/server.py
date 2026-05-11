@@ -36,7 +36,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SQLITE_PATH = DATA_DIR / "graph.db"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
-SIM_EDGE_THRESHOLD = 0.75
+SIM_EDGE_THRESHOLD       = 0.75   # within same project
+SIM_EDGE_CROSS_THRESHOLD = 0.85   # across projects (higher bar — must be strongly related)
 
 os.environ.setdefault("FASTEMBED_CACHE_PATH", str(DATA_DIR / ".cache"))
 
@@ -279,17 +280,24 @@ def _add_edge(src: str, dst: str, kind: str, weight: float):
 
 
 def _auto_link(mem_id: str, vec: np.ndarray, project: str):
-    neighbors = _cosine_search(vec, project, 7)
+    """Link to similar memories — semantic (same project) and cross-project (higher bar)."""
+    neighbors = _cosine_search(vec, None, 16)  # search globally
     for n in neighbors:
         if n["id"] == mem_id:
             continue
-        if n["score"] >= SIM_EDGE_THRESHOLD:
-            _add_edge(mem_id, n["id"], "semantic", n["score"])
-            _add_edge(n["id"], mem_id, "semantic", n["score"])
+        row = sql.execute("SELECT project FROM memories WHERE id = ?", (n["id"],)).fetchone()
+        if not row:
+            continue
+        same = row["project"] == project
+        threshold = SIM_EDGE_THRESHOLD if same else SIM_EDGE_CROSS_THRESHOLD
+        if n["score"] >= threshold:
+            kind = "semantic" if same else "cross"
+            _add_edge(mem_id, n["id"], kind, n["score"])
+            _add_edge(n["id"], mem_id, kind, n["score"])
 
 
 # --- routes ---
-VERSION = "0.1.23"
+VERSION = "0.1.24"
 
 
 @router.get("/health")
@@ -586,6 +594,27 @@ def delete_memory(mem_id: str):
         c.execute("DELETE FROM edges WHERE src = ? OR dst = ?", (mem_id, mem_id))
         c.execute("DELETE FROM vectors WHERE id = ?", (mem_id,))
     return {"deleted": mem_id}
+
+
+@router.post("/relink")
+def relink():
+    """Re-run auto-link over all memories. Use after threshold changes or
+    when introducing cross-project edges to existing data."""
+    _require_db()
+    rows = sql.execute("SELECT id, project FROM memories").fetchall()
+    relinked = 0
+    for r in rows:
+        vrow = sql.execute("SELECT vector FROM vectors WHERE id = ?", (r["id"],)).fetchone()
+        if not vrow:
+            continue
+        vec = np.frombuffer(vrow["vector"], dtype=np.float32)
+        _auto_link(r["id"], vec, r["project"])
+        relinked += 1
+    sql.commit()
+    counts = {row["kind"]: row["c"] for row in sql.execute(
+        "SELECT kind, COUNT(*) AS c FROM edges GROUP BY kind"
+    ).fetchall()}
+    return {"relinked": relinked, "edges_by_kind": counts}
 
 
 @router.post("/prune-orphans")
