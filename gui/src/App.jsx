@@ -232,22 +232,28 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
     setTransform({ x: 0, y: 0, k: 1 });
   }, [nodes.length]);
 
-  const handleWheel = useCallback((e) => {
-    e.preventDefault();
-    const rect = wrapRef.current.getBoundingClientRect();
-    const mx = e.clientX - rect.left - rect.width/2;
-    const my = e.clientY - rect.top  - rect.height/2;
-    const delta = -e.deltaY * 0.0015;
-    const factor = Math.exp(delta);
-    setTransform(t => {
-      const newK = Math.min(8, Math.max(0.3, t.k * factor));
-      const dk = newK / t.k;
-      return {
-        k: newK,
-        x: mx - (mx - t.x) * dk,
-        y: my - (my - t.y) * dk,
-      };
-    });
+  // wheel — must be a non-passive listener so we can preventDefault to stop page scroll
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left - rect.width / 2;
+      const my = e.clientY - rect.top  - rect.height / 2;
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      setTransform(t => {
+        const newK = Math.min(8, Math.max(0.3, t.k * factor));
+        const dk = newK / t.k;
+        return {
+          k: newK,
+          x: mx - (mx - t.x) * dk,
+          y: my - (my - t.y) * dk,
+        };
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
   const handleMouseDown = useCallback((e) => {
@@ -256,10 +262,11 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
   }, [transform]);
 
   const handleMouseMove = useCallback((e) => {
-    if (!dragRef.current) return;
-    const dx = e.clientX - dragRef.current.startX;
-    const dy = e.clientY - dragRef.current.startY;
-    setTransform(t => ({ ...t, x: dragRef.current.tx + dx, y: dragRef.current.ty + dy }));
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    setTransform(t => ({ ...t, x: d.tx + dx, y: d.ty + dy }));
   }, []);
 
   const handleMouseUp = useCallback(() => {
@@ -311,7 +318,6 @@ function Constellation({ nodes, edges, heatMode, maxAccess, onSelect, selectedId
 
   return (
     <div ref={wrapRef}
-      onWheel={handleWheel}
       onMouseDown={handleMouseDown}
       style={{
         position:"absolute", inset:0, cursor: dragRef.current ? "grabbing" : "grab",
