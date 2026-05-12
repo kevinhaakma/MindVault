@@ -324,7 +324,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.27"
+VERSION = "0.1.28"
 
 
 @router.get("/health")
@@ -435,7 +435,10 @@ async def _auth_middleware(request: Request, call_next):
         return await call_next(request)
     if path in _PUBLIC_API:
         return await call_next(request)
-    # also allow /api/memory/{id} and /api/supervisor/... under same gate
+    # Supervisor passthrough always allowed: it has its own supervisor-token guard
+    # and is only useful for trusted callers on Tailscale.
+    if path.startswith("/api/supervisor/") or path.startswith("/supervisor/"):
+        return await call_next(request)
     token = request.cookies.get("vex_session", "")
     if not _verify_token(token):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
