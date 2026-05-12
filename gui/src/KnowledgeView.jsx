@@ -54,8 +54,10 @@ export function KnowledgeView({
 
   // ── Auto-fit + warm-up zoom on data change ──────────────────────────────
   const fitDone = useRef(false);
+  const fitStartRef = useRef(null);
   useEffect(() => {
     fitDone.current = false;
+    fitStartRef.current = null;
   }, [data.nodes.length]);
 
   // ── Neighbor sets for focus dimming ─────────────────────────────────────
@@ -223,12 +225,18 @@ export function KnowledgeView({
         height={viewport.h}
         graphData={graphData}
         backgroundColor="transparent"
-        cooldownTicks={120}
+        cooldownTime={Infinity}
+        cooldownTicks={Infinity}
         warmupTicks={60}
-        onEngineStop={() => {
+        onEngineTick={() => {
           if (!fitDone.current && fgRef.current) {
-            fgRef.current.zoomToFit(400, 80);
-            fitDone.current = true;
+            // first-fit ~1s after start (no onEngineStop fires when cooldown is Infinity)
+            const now = performance.now();
+            if (!fitStartRef.current) fitStartRef.current = now;
+            if (now - fitStartRef.current > 1500) {
+              fgRef.current.zoomToFit(400, 80);
+              fitDone.current = true;
+            }
           }
         }}
         onZoom={({ k }) => setZoom(k)}
@@ -251,8 +259,9 @@ export function KnowledgeView({
         onNodeClick={(node) => onSelect?.(node)}
         onBackgroundClick={() => onSelect?.(null)}
         enableNodeDrag={true}
-        d3AlphaDecay={0.022}
-        d3VelocityDecay={0.32}
+        d3AlphaDecay={0.025}
+        d3VelocityDecay={0.45}
+        d3AlphaMin={0.0005}
       />
 
       {/* Zoom controls */}
