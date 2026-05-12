@@ -23,6 +23,7 @@ function MindVaultApp() {
   const [knowledge,       setKnowledge]       = useState({ nodes: [], edges: [], literals: [] });
   const [kindFilter,      setKindFilter]      = useState(new Set());
   const [predicateFilter, setPredicateFilter] = useState(new Set());
+  const [minMention,      setMinMention]      = useState(3); // density
   const [selectedEntity,  setSelectedEntity]  = useState(null);
   const [entityProfile,   setEntityProfile]   = useState(null);
   const [projects,        setProjects]        = useState([]);
@@ -228,6 +229,8 @@ function MindVaultApp() {
         setKindFilter={setKindFilter}
         predicateFilter={predicateFilter}
         setPredicateFilter={setPredicateFilter}
+        minMention={minMention}
+        setMinMention={setMinMention}
         vexMood={vexMood}
         lastUpdated={lastUpdated}
         onOpenFile={() => setFileOpen(true)}
@@ -248,6 +251,7 @@ function MindVaultApp() {
           searchMatches={search ? entityMatches : null}
           onSelect={setSelectedEntity}
           selectedEntityId={selectedEntity?.id}
+          minMention={minMention}
         />
 
         {fileOpen && (

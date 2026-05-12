@@ -18,7 +18,7 @@ function kindAnchor(kind) {
 
 export function KnowledgeView({
   data, hoverId, setHoverId, kindFilter, predicateFilter, searchMatches,
-  onSelect, selectedEntityId,
+  onSelect, selectedEntityId, minMention = 0,
 }) {
   const wrapRef = useRef(null);
   const fgRef   = useRef(null);
@@ -54,6 +54,15 @@ export function KnowledgeView({
       _group:    predicateGroupName(e.predicate),
     }));
 
+    // density filter — keep projects always; otherwise require mention_count >= minMention
+    if (minMention > 0) {
+      const keep = new Set(nodes
+        .filter(n => n.kind === "project" || (n.mention_count || 0) >= minMention)
+        .map(n => n.id));
+      nodes = nodes.filter(n => keep.has(n.id));
+      links = links.filter(l => keep.has(l.source) && keep.has(l.target));
+    }
+
     // kind filter
     if (kindFilter && kindFilter.size) {
       const keep = new Set(nodes.filter(n => kindFilter.has(n.kind || "other")).map(n => n.id));
@@ -61,7 +70,18 @@ export function KnowledgeView({
       links = links.filter(l => keep.has(l.source) && keep.has(l.target));
     }
     return { nodes, links };
-  }, [data, kindFilter, maxMention]);
+  }, [data, kindFilter, minMention, maxMention]);
+
+  // Dynamic kind anchor positions — only kinds actually present in current visible set
+  const kindAnchorMap = useMemo(() => {
+    const used = [...new Set(graphData.nodes.map(n => n.kind || "other"))];
+    const m = {};
+    used.forEach((k, i) => {
+      const angle = (i / used.length) * Math.PI * 2 - Math.PI / 2;
+      m[k] = { x: Math.cos(angle) * 520, y: Math.sin(angle) * 520 };
+    });
+    return m;
+  }, [graphData.nodes]);
 
   // ── Auto-fit + warm-up zoom on data change ──────────────────────────────
   const fitDone = useRef(false);
@@ -215,13 +235,13 @@ export function KnowledgeView({
     // moderate link distance — within-cluster links not too tight
     fg.d3Force("link")?.distance(95).strength(0.3);
     if (fg.d3Force("center")) fg.d3Force("center").strength(0.01);
-    // kind clustering — pull each node toward its kind anchor on the wide ring
-    fg.d3Force("kindX", forceX(n => kindAnchor(n.kind).x).strength(0.18));
-    fg.d3Force("kindY", forceY(n => kindAnchor(n.kind).y).strength(0.18));
+    // kind clustering — pull each node toward its dynamic kind anchor
+    fg.d3Force("kindX", forceX(n => (kindAnchorMap[n.kind || "other"] || { x: 0 }).x).strength(0.22));
+    fg.d3Force("kindY", forceY(n => (kindAnchorMap[n.kind || "other"] || { y: 0 }).y).strength(0.22));
     // hard collision — nodes can't overlap (radius scales with mention_count)
     fg.d3Force("collide", forceCollide(n => 12 + n.val * 3).strength(0.95).iterations(2));
     fg.d3ReheatSimulation();
-  }, [graphData.nodes.length]);
+  }, [graphData.nodes.length, kindAnchorMap]);
 
   // ── Zoom % ──────────────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1);

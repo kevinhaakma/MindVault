@@ -12,6 +12,7 @@ export const Sidebar = forwardRef(function Sidebar({
   entityMatchesSize, smartResultsSize,
   kindFilter, setKindFilter,
   predicateFilter, setPredicateFilter,
+  minMention, setMinMention,
   vexMood, lastUpdated,
   onOpenFile, onOpenArchive, onPruneOrphans, onSignOut,
 }, ref) {
@@ -75,6 +76,13 @@ export const Sidebar = forwardRef(function Sidebar({
           {smartResultsSize > 0 && ` · ${smartResultsSize} memor${smartResultsSize === 1 ? "y" : "ies"}`}
         </div>
       )}
+
+      <div>
+        <Label>Density · hide entities with &lt; {minMention} mentions</Label>
+        <input type="range" min="0" max="10" step="1" value={minMention}
+          onChange={e => setMinMention(+e.target.value)}
+          style={{ width: "100%", accentColor: "#5b9dff" }} />
+      </div>
 
       <EntityKindFilter
         kinds={stats?.entity_kinds || []}
