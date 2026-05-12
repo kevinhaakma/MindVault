@@ -130,6 +130,30 @@ def _init_sqlite() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_edges_src     ON edges(src);
         CREATE INDEX IF NOT EXISTS idx_memories_proj ON memories(project);
         CREATE INDEX IF NOT EXISTS idx_memories_time ON memories(created_at);
+
+        -- Knowledge layer: shared entities + typed triples
+        CREATE TABLE IF NOT EXISTS entities (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            canonical     TEXT NOT NULL UNIQUE,
+            kind          TEXT,
+            mention_count INTEGER DEFAULT 0,
+            created_at    REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS triples (
+            subj_id          TEXT NOT NULL,
+            predicate        TEXT NOT NULL,
+            obj_id           TEXT,
+            obj_literal      TEXT,
+            weight           REAL DEFAULT 1.0,
+            source_memory_id TEXT,
+            created_at       REAL NOT NULL,
+            PRIMARY KEY (subj_id, predicate, obj_id, obj_literal)
+        );
+        CREATE INDEX IF NOT EXISTS idx_triples_subj ON triples(subj_id);
+        CREATE INDEX IF NOT EXISTS idx_triples_obj  ON triples(obj_id);
+        CREATE INDEX IF NOT EXISTS idx_entities_canon ON entities(canonical);
+        CREATE INDEX IF NOT EXISTS idx_entities_kind  ON entities(kind);
     """)
     conn.commit()
     return conn
@@ -300,7 +324,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.26"
+VERSION = "0.1.27"
 
 
 @router.get("/health")
@@ -750,6 +774,186 @@ def delete_memory(mem_id: str):
         c.execute("DELETE FROM edges WHERE src = ? OR dst = ?", (mem_id, mem_id))
         c.execute("DELETE FROM vectors WHERE id = ?", (mem_id,))
     return {"deleted": mem_id}
+
+
+# ── Knowledge graph: entities + triples ─────────────────────────────────────
+def _canonical(name: str) -> str:
+    s = (name or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _upsert_entity(name: str, kind: Optional[str] = None) -> str:
+    canon = _canonical(name)
+    if not canon:
+        raise ValueError("empty name")
+    row = sql.execute("SELECT id, kind FROM entities WHERE canonical = ?", (canon,)).fetchone()
+    if row:
+        eid = row["id"]
+        # backfill kind if missing
+        if kind and not row["kind"]:
+            sql.execute("UPDATE entities SET kind = ? WHERE id = ?", (kind, eid))
+        sql.execute("UPDATE entities SET mention_count = mention_count + 1 WHERE id = ?", (eid,))
+        return eid
+    eid = str(uuid.uuid4())
+    sql.execute(
+        "INSERT INTO entities (id, name, canonical, kind, mention_count, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        (eid, name.strip(), canon, kind, time.time()),
+    )
+    return eid
+
+
+class EntityIn(BaseModel):
+    name: str
+    kind: Optional[str] = None
+
+
+class TripleIn(BaseModel):
+    subject:   str
+    predicate: str
+    object:    Optional[str] = None         # entity name OR literal
+    object_kind: Optional[str] = None       # if object is an entity, hint its kind
+    literal:   bool = False                 # if True, treat object as raw literal
+    source_memory_id: Optional[str] = None
+    weight:    float = 1.0
+
+
+class ExtractIn(BaseModel):
+    entities: list[EntityIn] = []
+    relations: list[TripleIn] = []
+
+
+@router.post("/entities")
+def upsert_entity_route(req: EntityIn):
+    _require_db()
+    with tx():
+        eid = _upsert_entity(req.name, req.kind)
+    return {"id": eid, "canonical": _canonical(req.name)}
+
+
+@router.get("/entities")
+def list_entities(kind: Optional[str] = None, limit: int = 500):
+    _require_db()
+    if kind:
+        rows = sql.execute(
+            "SELECT id, name, canonical, kind, mention_count, created_at "
+            "FROM entities WHERE kind = ? ORDER BY mention_count DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+    else:
+        rows = sql.execute(
+            "SELECT id, name, canonical, kind, mention_count, created_at "
+            "FROM entities ORDER BY mention_count DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {"entities": [dict(r) for r in rows]}
+
+
+@router.post("/triples")
+def add_triple_route(req: TripleIn):
+    _require_db()
+    with tx():
+        subj_id = _upsert_entity(req.subject)
+        if req.literal or req.object is None:
+            obj_id = None
+            obj_literal = req.object
+        else:
+            obj_id = _upsert_entity(req.object, req.object_kind)
+            obj_literal = None
+        sql.execute(
+            "INSERT OR REPLACE INTO triples "
+            "(subj_id, predicate, obj_id, obj_literal, weight, source_memory_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (subj_id, req.predicate, obj_id, obj_literal,
+             req.weight, req.source_memory_id, time.time()),
+        )
+    return {"ok": True, "subj_id": subj_id, "obj_id": obj_id}
+
+
+@router.post("/memory/{mem_id}/extract")
+def memory_extract(mem_id: str, req: ExtractIn):
+    """Agent-supplied entity + relation extraction for a memory."""
+    _require_db()
+    if not sql.execute("SELECT id FROM memories WHERE id = ?", (mem_id,)).fetchone():
+        raise HTTPException(404, "memory not found")
+    added_entities = 0
+    added_triples  = 0
+    with tx():
+        for e in req.entities:
+            _upsert_entity(e.name, e.kind)
+            added_entities += 1
+        for t in req.relations:
+            subj_id = _upsert_entity(t.subject)
+            if t.literal or t.object is None:
+                obj_id = None
+                obj_literal = t.object
+            else:
+                obj_id = _upsert_entity(t.object, t.object_kind)
+                obj_literal = None
+            sql.execute(
+                "INSERT OR REPLACE INTO triples "
+                "(subj_id, predicate, obj_id, obj_literal, weight, source_memory_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (subj_id, t.predicate, obj_id, obj_literal,
+                 t.weight, mem_id, time.time()),
+            )
+            added_triples += 1
+    return {"entities": added_entities, "triples": added_triples}
+
+
+@router.get("/knowledge")
+def knowledge_graph(kind: Optional[str] = None, limit: int = 1000):
+    """Returns entity-centric graph: nodes are entities, edges are predicates."""
+    _require_db()
+    if kind:
+        ent_rows = sql.execute(
+            "SELECT id, name, canonical, kind, mention_count, created_at "
+            "FROM entities WHERE kind = ? ORDER BY mention_count DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+    else:
+        ent_rows = sql.execute(
+            "SELECT id, name, canonical, kind, mention_count, created_at "
+            "FROM entities ORDER BY mention_count DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    ids = [r["id"] for r in ent_rows]
+    nodes = []
+    coord_by_id: dict[str, list[float]] = {}
+
+    # Use mention_count for size; layout by simple circular spread or PCA on co-occurrence (skipped — frontend does sim)
+    for n in ent_rows:
+        d = dict(n)
+        d["x"] = 0.0
+        d["y"] = 0.0
+        nodes.append(d)
+
+    if not ids:
+        return {"nodes": [], "edges": []}
+
+    placeholders = ",".join("?" * len(ids))
+    triple_rows = sql.execute(
+        f"SELECT subj_id, predicate, obj_id, obj_literal, weight "
+        f"FROM triples WHERE subj_id IN ({placeholders}) "
+        f"  AND (obj_id IS NULL OR obj_id IN ({placeholders}))",
+        ids + ids,
+    ).fetchall()
+
+    edges = []
+    for t in triple_rows:
+        if not t["obj_id"]:
+            continue   # skip literal-targets in graph view (still queryable elsewhere)
+        edges.append({
+            "src":       t["subj_id"],
+            "dst":       t["obj_id"],
+            "predicate": t["predicate"],
+            "kind":      "triple",
+            "weight":    t["weight"],
+        })
+
+    return {"nodes": nodes, "edges": edges}
 
 
 @router.post("/relink")
