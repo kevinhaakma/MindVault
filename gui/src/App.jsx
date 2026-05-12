@@ -21,7 +21,7 @@ const EDGE_COLORS = {
   cross:    "rgba(184,107,255,0.75)",  // bright purple — bridges projects
 };
 
-const VIEWS = ["constellation", "knowledge", "archive", "file"];
+// Single primary view (Knowledge). Archive + File are drawers/modals.
 
 const ENTITY_KIND_COLORS = {
   project:   "#5b9dff",
@@ -781,7 +781,19 @@ function Field({ label, children }) {
 }
 
 // ── Knowledge view (entity-centric force graph) ──────────────────────────────
-function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, selectedEntityId }) {
+// predicate → which PREDICATE_GROUPS.name it belongs to
+function predicateGroupName(p) {
+  if (!p) return "Other";
+  const s = p.toLowerCase();
+  if (/^(uses|built_with|requires|runs_on|reads)$/.test(s))                 return "Tech use";
+  if (/^(contains|part_of|has_views|builds_as|groups|outputs|models)$/.test(s)) return "Composition";
+  if (/^(has_bug|had_bug|had_issue)$/.test(s))                              return "Problems";
+  if (/^(has_lesson|has_decision|has_design|has_requirement|has_theme)$/.test(s)) return "Wisdom";
+  if (/^(lives_at|deploys_to|hosted_on|hosted_at|runs_on_port|stakeholder_of)$/.test(s)) return "Place / People";
+  return "Other";
+}
+
+function KnowledgeView({ data, hoverId, setHoverId, kindFilter, predicateFilter, searchMatches, onSelect, selectedEntityId }) {
   const wrapRef = useRef(null);
   const simRef  = useRef(new Map());
   const edgesRef = useRef(data.edges);
@@ -861,13 +873,27 @@ function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, select
     let raf;
     let last = performance.now();
     const start = last;
-    const REPEL = 0.025, SPRING = 1.4, IDEAL = 0.28, DAMP = 0.85, GRAVITY = 0.25, MAX_V = 1.4, SIM_K = 6;
+    const REPEL = 0.022, SPRING = 1.4, IDEAL = 0.26, DAMP = 0.85, GRAVITY = 0.22,
+          MAX_V = 1.4, SIM_K = 6, KIND_PULL = 0.0018;
+    // kind anchors — places each entity-kind cluster around a deterministic ring
+    const kindAnchor = (k) => {
+      const kinds = Object.keys(ENTITY_KIND_COLORS);
+      const idx = kinds.indexOf(k);
+      if (idx < 0) return { ax: 0, ay: 0 };
+      const angle = (idx / kinds.length) * Math.PI * 2;
+      return { ax: Math.cos(angle) * 0.55, ay: Math.sin(angle) * 0.55 };
+    };
+    // build id → kind map for sim
+    const kindById = new Map();
+    data.nodes.forEach(n => kindById.set(n.id, n.kind || "other"));
+
     const step = () => {
       const now = performance.now();
       const dt = Math.min(0.033, (now - last) / 1000);
       last = now;
       const m = simRef.current;
       const arr = [...m.values()];
+      const ids = [...m.keys()];
       for (let i = 0; i < arr.length; i++) {
         const a = arr[i];
         for (let j = i+1; j < arr.length; j++) {
@@ -891,9 +917,14 @@ function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, select
         a.vx += fx; a.vy += fy;
         b.vx -= fx; b.vy -= fy;
       }
-      for (const n of arr) {
+      for (let i = 0; i < arr.length; i++) {
+        const n = arr[i];
+        const k = kindById.get(ids[i]);
+        const a = kindAnchor(k);
         n.vx += -n.x * GRAVITY * dt;
         n.vy += -n.y * GRAVITY * dt;
+        n.vx += (a.ax - n.x) * KIND_PULL;
+        n.vy += (a.ay - n.y) * KIND_PULL;
         n.vx *= DAMP; n.vy *= DAMP;
         if (n.vx > MAX_V) n.vx = MAX_V;
         if (n.vx < -MAX_V) n.vx = -MAX_V;
@@ -983,8 +1014,10 @@ function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, select
           {visibleEdges.map((e, i) => {
             const a = nodePos.get(e.src), b = nodePos.get(e.dst);
             if (!a || !b) return null;
+            const group = predicateGroupName(e.predicate);
+            const pf = predicateFilter && !predicateFilter.has(group);
             const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
-            const dim = hoverId && !involved;
+            const dim = (hoverId && !involved) || pf;
             const offset = -((time * 18) % 20);
             return (
               <line key={i}
@@ -993,7 +1026,7 @@ function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, select
                 strokeWidth={(0.6 + 1.1*(e.weight||0.5)) * (involved ? 2 : 1)}
                 strokeDasharray="8 4"
                 strokeDashoffset={offset}
-                opacity={dim ? 0.06 : 1}
+                opacity={dim ? (pf ? 0.04 : 0.06) : 1}
               />
             );
           })}
@@ -1019,8 +1052,10 @@ function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, select
             const sz = sizeFor(n);
             const isHover = hoverId === n.id;
             const isSel   = selectedEntityId === n.id;
+            const isMatch = searchMatches?.has(n.id);
             const dim = hoverId && !hoverNeighbors?.has(n.id);
-            const labelOn = isHover || isSel || alwaysLabel.has(n.id);
+            const labelOn = isHover || isSel || isMatch || alwaysLabel.has(n.id);
+            const matchPulse = isMatch ? (1 + 0.25 * Math.sin(time * 2.4 + sz)) : 1;
             return (
               <g key={n.id}
                 onMouseEnter={() => setHoverId(n.id)}
@@ -1028,6 +1063,14 @@ function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, select
                 onClick={(ev) => { ev.stopPropagation(); onSelect?.(n); }}
                 style={{ cursor:"pointer" }}
               >
+                {isMatch && (
+                  <circle
+                    cx={p.x} cy={p.y} r={sz * 2.2 * matchPulse}
+                    fill="none" stroke="#fff" strokeWidth={1.2}
+                    opacity={0.55 + 0.25 * Math.sin(time * 2.4 + sz)}
+                    pointerEvents="none"
+                  />
+                )}
                 <circle
                   cx={p.x} cy={p.y} r={sz}
                   fill={colorFor(n)}
@@ -1264,7 +1307,10 @@ function AuthGate({ children }) {
 
 // ── Main App ─────────────────────────────────────────────────────────────────
 function MindVaultApp() {
-  const [view,            setView]            = useState("constellation");
+  // Knowledge graph is now the home view. Archive + File live in drawers/modals.
+  const [archiveOpen,     setArchiveOpen]     = useState(false);
+  const [fileOpen,        setFileOpen]        = useState(false);
+  const [predicateFilter, setPredicateFilter] = useState(new Set()); // empty = all groups
   const [graph,           setGraph]           = useState({ nodes:[], edges:[] });
   const [knowledge,       setKnowledge]       = useState({ nodes:[], edges:[], literals:[] });
   const [kindFilter,      setKindFilter]      = useState(new Set());      // empty = all kinds
@@ -1374,7 +1420,9 @@ function MindVaultApp() {
       const t = e.target;
       const inField = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
       if (e.key === "Escape") {
-        if (selectedEntity) setSelectedEntity(null);
+        if (fileOpen) setFileOpen(false);
+        else if (archiveOpen) setArchiveOpen(false);
+        else if (selectedEntity) setSelectedEntity(null);
         else if (selected || fullMemory) { setSelected(null); setFullMemory(null); }
         else if (search) setSearch("");
         else if (inField) t.blur();
@@ -1382,14 +1430,13 @@ function MindVaultApp() {
       }
       if (inField) return;
       if (e.key === "/") { e.preventDefault(); searchRef.current?.focus(); }
-      else if (e.key === "1") setView("constellation");
-      else if (e.key === "2") setView("archive");
-      else if (e.key === "3") setView("file");
+      else if (e.key === "n") setFileOpen(true);
+      else if (e.key === "a") setArchiveOpen(true);
       else if (e.key === "r" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); tick(); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, fullMemory, selectedEntity, search, tick]);
+  }, [selected, fullMemory, selectedEntity, search, fileOpen, archiveOpen, tick]);
 
   // filter pipeline
   const timeFiltered = useMemo(() => {
@@ -1457,6 +1504,18 @@ function MindVaultApp() {
     });
     return s.size ? s : null;
   }, [search, smartResults, timeFiltered]);
+
+  // entityMatches: entity IDs whose name matches the search query (substring)
+  const entityMatches = useMemo(() => {
+    if (!search) return new Set();
+    const q = search.toLowerCase();
+    return new Set(
+      knowledge.nodes
+        .filter(n => (n.name || "").toLowerCase().includes(q) ||
+                     (n.canonical || "").includes(q))
+        .map(n => n.id)
+    );
+  }, [search, knowledge.nodes]);
 
   const maxAccess = useMemo(
     () => Math.max(1, ...visible.nodes.map(n => n.access_count||0)),
@@ -1538,171 +1597,128 @@ function MindVaultApp() {
           </div>
         </div>
 
-        {/* View tabs */}
-        <div style={{
-          display:"flex", gap:2,
-          padding:4, borderRadius:10,
-          background:"rgba(255,255,255,0.025)",
-          border:"1px solid rgba(255,255,255,0.05)",
-          boxShadow:"inset 0 1px 0 rgba(255,255,255,0.03)",
-        }}>
-          {VIEWS.map(v => (
-            <button key={v} onClick={() => setView(v)} style={{
-              flex:1, padding:"8px 0", borderRadius:7, border:"none",
-              background: view===v
-                ? "linear-gradient(135deg, rgba(91,157,255,0.22), rgba(184,107,255,0.16))"
-                : "transparent",
-              color: view===v ? "#cfe0ff" : "#777",
-              fontSize:11, fontWeight:700, textTransform:"capitalize", cursor:"pointer",
-              letterSpacing:0.4,
-              boxShadow: view===v ? "0 4px 14px rgba(91,157,255,0.18)" : "none",
-              transition:"all 0.18s ease",
-            }}>{v}</button>
-          ))}
+        {/* Primary actions */}
+        <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+          <button onClick={() => setFileOpen(true)} style={{
+            padding:"10px 12px", borderRadius:8, border:"none", cursor:"pointer",
+            background:"linear-gradient(135deg, rgba(91,157,255,0.20), rgba(184,107,255,0.16))",
+            color:"#cfe0ff", fontSize:12, fontWeight:700, letterSpacing:0.4,
+            boxShadow:"0 4px 14px rgba(91,157,255,0.16)",
+          }}>＋  File memory</button>
+          <button onClick={() => setArchiveOpen(true)} style={{
+            padding:"8px 12px", borderRadius:8, cursor:"pointer",
+            background:"rgba(255,255,255,0.04)", color:"#aab", fontSize:11, fontWeight:600,
+            border:"1px solid rgba(255,255,255,0.06)", letterSpacing:0.3,
+          }}>⬚  Browse {stats?.memories ?? 0} memories</button>
         </div>
 
-        {/* Stats */}
+        {/* Stats — Knowledge centric */}
         <div style={{
           display:"flex", justifyContent:"space-between",
           padding:"10px 12px", borderRadius:8,
           background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.04)",
         }}>
-          {view === "knowledge" ? (
-            <>
-              <Stat label="entities" value={stats?.entities ?? 0} color="#7ee787" />
-              <Stat label="triples"  value={stats?.triples ?? 0}  color="#b86bff" />
-              <Stat label="visible"  value={knowledge.nodes.length} color="#ffb454" />
-            </>
-          ) : (
-            <>
-              <Stat label="memories" value={stats?.memories ?? 0} color="#7ee787" />
-              <Stat label="edges"    value={stats?.edges ?? 0}    color="#5b9dff" />
-              <Stat label="visible"  value={visible.nodes.length} color="#ffb454" />
-            </>
+          <Stat label="entities" value={stats?.entities ?? 0} color="#7ee787" />
+          <Stat label="triples"  value={stats?.triples ?? 0}  color="#b86bff" />
+          <Stat label="visible"  value={knowledge.nodes.length} color="#ffb454" />
+        </div>
+
+        {/* Unified search — searches entities + memories */}
+        <div style={{ position:"relative" }}>
+          <input
+            ref={searchRef}
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search entities + memories…  ( / )"
+            style={{ ...inputStyle, paddingLeft:30, paddingRight: search ? 28 : 11 }}
+          />
+          {search && (
+            <button onClick={() => setSearch("")} style={{
+              position:"absolute", right:6, top:"50%", transform:"translateY(-50%)",
+              background:"none", border:"none", color:"#666", cursor:"pointer",
+              fontSize:14, padding:"4px 6px", lineHeight:1,
+            }} title="Clear (Esc)">×</button>
+          )}
+          <span style={{
+            position:"absolute", left:10, top:"50%", transform:"translateY(-50%)",
+            fontSize:13, color:"#444", pointerEvents:"none"
+          }}>⌕</span>
+        </div>
+
+        {/* Search hits summary */}
+        {search && (
+          <div style={{ marginTop:-10, fontSize:10, color:"#555", lineHeight:1.5 }}>
+            {entityMatches.size} entit{entityMatches.size===1?"y":"ies"}
+            {smartResults && ` · ${Object.keys(smartResults).length} memor${Object.keys(smartResults).length===1?"y":"ies"}`}
+          </div>
+        )}
+
+        {/* Entity kind filter */}
+        <div>
+          <Label>Entity kinds</Label>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+            {(stats?.entity_kinds || []).map(k => {
+              const active = kindFilter.has(k.kind);
+              const color = ENTITY_KIND_COLORS[k.kind] || "#888";
+              return (
+                <button key={k.kind} onClick={() => {
+                  setKindFilter(prev => {
+                    const next = new Set(prev);
+                    if (next.has(k.kind)) next.delete(k.kind); else next.add(k.kind);
+                    return next;
+                  });
+                }} style={{
+                  padding:"4px 9px", fontSize:10, fontWeight:600,
+                  borderRadius:12,
+                  border:`1px solid ${active ? color : "rgba(255,255,255,0.06)"}`,
+                  background: active ? `${color}22` : "transparent",
+                  color: active ? color : "#888",
+                  cursor:"pointer", textTransform:"capitalize",
+                }}>{k.kind} <span style={{ opacity:0.55 }}>{k.count}</span></button>
+              );
+            })}
+          </div>
+          {kindFilter.size > 0 && (
+            <button onClick={() => setKindFilter(new Set())} style={{
+              marginTop:6, fontSize:10, color:"#666",
+              background:"none", border:"none", cursor:"pointer", padding:0,
+            }}>clear</button>
           )}
         </div>
 
-        {/* Search (constellation + archive views — not knowledge or file) */}
-        {(view === "constellation" || view === "archive") && (
-          <div style={{ position:"relative" }}>
-            <input
-              ref={searchRef}
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search memories…  ( / )"
-              style={{ ...inputStyle, paddingLeft:30, paddingRight: search ? 28 : 11 }}
-            />
-            {search && (
-              <button
-                onClick={() => setSearch("")}
-                style={{
-                  position:"absolute", right:6, top:"50%", transform:"translateY(-50%)",
-                  background:"none", border:"none", color:"#666", cursor:"pointer",
-                  fontSize:14, padding:"4px 6px", lineHeight:1,
-                }}
-                title="Clear (Esc)"
-              >×</button>
-            )}
-            <span style={{
-              position:"absolute", left:10, top:"50%", transform:"translateY(-50%)",
-              fontSize:13, color:"#444", pointerEvents:"none"
-            }}>⌕</span>
+        {/* Edge meaning (also a filter — click to toggle group) */}
+        <div>
+          <Label>Edge meaning</Label>
+          <div style={{ display:"flex", flexDirection:"column", gap:4, fontSize:11 }}>
+            {PREDICATE_GROUPS.map(g => {
+              const active = predicateFilter.has(g.name);
+              return (
+                <button key={g.name} onClick={() => {
+                  setPredicateFilter(prev => {
+                    const next = new Set(prev);
+                    if (next.has(g.name)) next.delete(g.name); else next.add(g.name);
+                    return next;
+                  });
+                }} style={{
+                  display:"flex", alignItems:"center", gap:8, padding:"4px 6px",
+                  background: active ? "rgba(255,255,255,0.04)" : "transparent",
+                  border:"none", borderRadius:4,
+                  cursor:"pointer", textAlign:"left",
+                  opacity: predicateFilter.size && !active ? 0.4 : 1,
+                }}>
+                  <span style={{ width:18, height:2, background:g.color, borderRadius:1, flexShrink:0 }} />
+                  <span style={{ color: active ? "#fff" : "#aaa", fontSize:11 }}>{g.name}</span>
+                </button>
+              );
+            })}
           </div>
-        )}
-
-        {/* Search status — only when searching */}
-        {(view === "constellation" || view === "archive") && search && (
-          <div style={{ marginTop:-10, fontSize:10, color:"#555", lineHeight:1.5 }}>
-            {visible.nodes.length} match{visible.nodes.length===1?"":"es"}
-            {smartResults ? ` · ${Object.keys(smartResults).length} semantic` : " · keyword only"}
-          </div>
-        )}
-
-        {/* Project filter (memory views only) */}
-        {(view === "constellation" || view === "archive") && (
-          <div>
-            <Label>Project</Label>
-            <select value={selectedProject||""} onChange={e => setSelectedProject(e.target.value||null)} style={inputStyle}>
-              <option value="">All projects</option>
-              {projects.map(p => (
-                <option key={p.project} value={p.project}>{p.project} ({p.count})</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {/* Constellation-only controls */}
-        {view === "constellation" && (
-          <>
-            <div>
-              <Label>Time window · {Math.round(timeFilter*100)}%</Label>
-              <input type="range" min="0.05" max="1" step="0.01" value={timeFilter}
-                onChange={e => setTimeFilter(+e.target.value)}
-                style={{ width:"100%", accentColor:"#5b9dff" }} />
-            </div>
-
-            <div>
-              <Label>View mode</Label>
-              <div style={{ display:"flex", gap:6 }}>
-                <SBtn active={!heatMode} onClick={() => setHeatMode(false)}>By kind</SBtn>
-                <SBtn active={heatMode}  onClick={() => setHeatMode(true)}>Heat</SBtn>
-              </div>
-            </div>
-
-            <Legend heatMode={heatMode} />
-          </>
-        )}
-
-        {/* Knowledge-only controls */}
-        {view === "knowledge" && (
-          <>
-            <div>
-              <Label>Entity kinds</Label>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
-                {(stats?.entity_kinds || []).map(k => {
-                  const active = kindFilter.has(k.kind);
-                  const color = ENTITY_KIND_COLORS[k.kind] || "#888";
-                  return (
-                    <button key={k.kind} onClick={() => {
-                      setKindFilter(prev => {
-                        const next = new Set(prev);
-                        if (next.has(k.kind)) next.delete(k.kind); else next.add(k.kind);
-                        return next;
-                      });
-                    }} style={{
-                      padding:"4px 9px", fontSize:10, fontWeight:600,
-                      borderRadius:12,
-                      border:`1px solid ${active ? color : "rgba(255,255,255,0.06)"}`,
-                      background: active ? `${color}22` : "transparent",
-                      color: active ? color : "#888",
-                      cursor:"pointer", textTransform:"capitalize",
-                    }}>{k.kind} <span style={{ opacity:0.55 }}>{k.count}</span></button>
-                  );
-                })}
-              </div>
-              {kindFilter.size > 0 && (
-                <button onClick={() => setKindFilter(new Set())} style={{
-                  marginTop:6, fontSize:10, color:"#666",
-                  background:"none", border:"none", cursor:"pointer", padding:0,
-                }}>clear filter</button>
-              )}
-            </div>
-
-            <div>
-              <Label>Edge meaning</Label>
-              <div style={{ display:"flex", flexDirection:"column", gap:4, fontSize:11 }}>
-                {PREDICATE_GROUPS.map(g => (
-                  <div key={g.name} style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    <span style={{
-                      width:18, height:2, background:g.color, borderRadius:1, flexShrink:0,
-                    }} />
-                    <span style={{ color:"#aaa", fontSize:11 }}>{g.name}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </>
-        )}
+          {predicateFilter.size > 0 && (
+            <button onClick={() => setPredicateFilter(new Set())} style={{
+              marginTop:6, fontSize:10, color:"#666",
+              background:"none", border:"none", cursor:"pointer", padding:0,
+            }}>show all edges</button>
+          )}
+        </div>
 
         {/* Live indicator + actions */}
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
@@ -1721,9 +1737,7 @@ function MindVaultApp() {
               {lastUpdated ? timeAgo(lastUpdated) : "…"}
             </span>
           </div>
-          {(view === "constellation" || view === "archive") && (
-            <SBtn onClick={pruneOrphans} danger>Prune orphans</SBtn>
-          )}
+          <SBtn onClick={pruneOrphans} danger>Prune orphans</SBtn>
         </div>
 
         {/* Vex */}
@@ -1742,7 +1756,8 @@ function MindVaultApp() {
             display:"flex", flexWrap:"wrap", justifyContent:"center", gap:6,
           }}>
             <span><span className="kbd">/</span> search</span>
-            <span><span className="kbd">1·2·3</span> views</span>
+            <span><span className="kbd">n</span> new</span>
+            <span><span className="kbd">a</span> archive</span>
             <span><span className="kbd">esc</span> close</span>
           </div>
           <button
@@ -1764,45 +1779,85 @@ function MindVaultApp() {
       <main style={{ flex:1, position:"relative", overflow:"hidden" }}>
         <Starfield />
 
-        {view === "constellation" && (
-          <Constellation
-            nodes={visible.nodes}
-            edges={visible.edges}
-            heatMode={heatMode}
-            maxAccess={maxAccess}
-            onSelect={setSelected}
-            selectedId={selected?.id}
-            hoverId={hoverId}
-            setHoverId={setHoverId}
-            matchIds={matchIds}
-          />
+        {/* Primary view — knowledge graph always */}
+        <KnowledgeView
+          data={knowledge}
+          hoverId={hoverId}
+          setHoverId={setHoverId}
+          kindFilter={kindFilter.size ? kindFilter : null}
+          predicateFilter={predicateFilter.size ? predicateFilter : null}
+          searchMatches={search ? entityMatches : null}
+          onSelect={setSelectedEntity}
+          selectedEntityId={selectedEntity?.id}
+        />
+
+        {/* File memory modal */}
+        {fileOpen && (
+          <>
+            <div onClick={() => setFileOpen(false)} style={{
+              position:"absolute", inset:0, zIndex:20,
+              background:"rgba(0,0,0,0.5)", backdropFilter:"blur(6px)",
+              animation:"fadeIn 0.18s ease",
+            }} />
+            <div onClick={(e) => e.stopPropagation()} style={{
+              position:"absolute", left:"50%", top:"50%", transform:"translate(-50%, -50%)",
+              width:540, maxHeight:"85vh", zIndex:21,
+              background:"rgba(10,10,20,0.97)",
+              border:"1px solid rgba(91,157,255,0.25)",
+              borderRadius:14, backdropFilter:"blur(20px)",
+              boxShadow:"0 20px 80px rgba(0,0,0,0.8)",
+              overflow:"hidden", animation:"slideIn 0.22s cubic-bezier(.2,.8,.2,1)",
+            }}>
+              <button onClick={() => setFileOpen(false)} style={{
+                position:"absolute", right:12, top:12, zIndex:1,
+                ...closeBtnStyle,
+              }}>×</button>
+              <FileForm
+                projects={projects}
+                onWrote={() => { lastHashRef.current = { m: -1, e: -1 }; tick(); setFileOpen(false); }}
+                vexSay={vexSay}
+              />
+            </div>
+          </>
         )}
 
-        {view === "knowledge" && (
-          <KnowledgeView
-            data={knowledge}
-            hoverId={hoverId}
-            setHoverId={setHoverId}
-            kindFilter={kindFilter.size ? kindFilter : null}
-            onSelect={setSelectedEntity}
-            selectedEntityId={selectedEntity?.id}
-          />
-        )}
-
-        {view === "archive" && (
-          <Archive
-            nodes={visible.nodes}
-            onSelect={setSelected}
-            selectedId={selected?.id}
-          />
-        )}
-
-        {view === "file" && (
-          <FileForm
-            projects={projects}
-            onWrote={() => { lastHashRef.current = { m: -1, e: -1 }; tick(); }}
-            vexSay={vexSay}
-          />
+        {/* Archive drawer (slide-in right) */}
+        {archiveOpen && (
+          <>
+            <div onClick={() => setArchiveOpen(false)} style={{
+              position:"absolute", inset:0, zIndex:18,
+              background:"rgba(0,0,0,0.35)", backdropFilter:"blur(4px)",
+              animation:"fadeIn 0.18s ease",
+            }} />
+            <div onClick={(e) => e.stopPropagation()} style={{
+              position:"absolute", right:0, top:0, bottom:0, width:"min(640px, 80vw)",
+              zIndex:19,
+              background:"rgba(10,10,20,0.98)",
+              borderLeft:"1px solid rgba(91,157,255,0.2)",
+              backdropFilter:"blur(24px)",
+              boxShadow:"-20px 0 60px rgba(0,0,0,0.7)",
+              overflow:"hidden", display:"flex", flexDirection:"column",
+              animation:"slideInRight 0.25s cubic-bezier(.2,.8,.2,1)",
+            }}>
+              <div style={{ display:"flex", alignItems:"center", padding:"16px 22px",
+                            borderBottom:"1px solid rgba(255,255,255,0.05)" }}>
+                <span style={{ fontSize:14, fontWeight:700, color:"#e0e0f0" }}>Memory archive</span>
+                <span style={{ marginLeft:10, fontSize:11, color:"#666" }}>
+                  {visible.nodes.length} {search ? "match" : "memor"}{visible.nodes.length===1?(search?"":"y"):(search?"es":"ies")}
+                </span>
+                <button onClick={() => setArchiveOpen(false)} style={{
+                  marginLeft:"auto", ...closeBtnStyle,
+                }}>×</button>
+              </div>
+              <div style={{ flex:1, position:"relative" }}>
+                <Archive
+                  nodes={visible.nodes}
+                  onSelect={(m) => { setSelected(m); setArchiveOpen(false); }}
+                  selectedId={selected?.id}
+                />
+              </div>
+            </div>
+          </>
         )}
 
         {/* Entity profile panel (Knowledge view click) */}
@@ -1922,7 +1977,6 @@ function MindVaultApp() {
                       <div key={m.id}
                         onClick={() => {
                           setSelectedEntity(null);
-                          setView("constellation");
                           setSelected(m);
                         }}
                         style={{
@@ -2071,6 +2125,10 @@ function MindVaultApp() {
         }
         @keyframes slideIn {
           from { opacity:0; transform: translateX(20px); }
+          to   { opacity:1; transform: translateX(0); }
+        }
+        @keyframes slideInRight {
+          from { opacity:0; transform: translateX(60px); }
           to   { opacity:1; transform: translateX(0); }
         }
         @keyframes spin {
