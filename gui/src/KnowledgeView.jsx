@@ -4,6 +4,77 @@ import {
   predicateColor, predicateGroupName,
 } from "./constants.js";
 
+function CtrlBtn({ children, onClick, title }) {
+  return (
+    <button onClick={onClick} title={title} style={{
+      width: 26, height: 26, border: "none", background: "transparent",
+      color: "#aaa", fontSize: 14, cursor: "pointer", borderRadius: 4,
+      transition: "background 0.12s",
+    }} onMouseEnter={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.06)"}
+       onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+    >{children}</button>
+  );
+}
+
+function Minimap({ nodes, nodePos, viewport, transform, colorFor }) {
+  const W = 130, H = 90;
+  // bounds in pixel space
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  nodes.forEach(n => {
+    const p = nodePos.get(n.id); if (!p) return;
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  });
+  if (!isFinite(minX)) return null;
+  const pad = 20;
+  minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+  const sx = W / (maxX - minX), sy = H / (maxY - minY);
+  const s = Math.min(sx, sy);
+  // viewport rectangle (where main view is looking, in source-space)
+  const vw = viewport.w / transform.k;
+  const vh = viewport.h / transform.k;
+  const vx = -transform.x / transform.k + viewport.w / 2 - vw / 2;
+  const vy = -transform.y / transform.k + viewport.h / 2 - vh / 2;
+
+  return (
+    <div style={{
+      position: "absolute", right: 16, bottom: 16,
+      width: W, height: H,
+      background: "rgba(10,10,20,0.85)", backdropFilter: "blur(10px)",
+      border: "1px solid rgba(255,255,255,0.07)",
+      borderRadius: 8, overflow: "hidden",
+      pointerEvents: "none",
+    }}>
+      <svg width={W} height={H}>
+        {nodes.map(n => {
+          const p = nodePos.get(n.id); if (!p) return null;
+          return (
+            <circle key={n.id}
+              cx={(p.x - minX) * s}
+              cy={(p.y - minY) * s}
+              r={1.4}
+              fill={colorFor(n)}
+              opacity={0.85}
+            />
+          );
+        })}
+        {/* viewport indicator */}
+        <rect
+          x={(vx - minX) * s}
+          y={(vy - minY) * s}
+          width={vw * s}
+          height={vh * s}
+          fill="none"
+          stroke="rgba(255,255,255,0.6)"
+          strokeWidth={1}
+        />
+      </svg>
+    </div>
+  );
+}
+
 export function KnowledgeView({
   data, hoverId, setHoverId, kindFilter, predicateFilter, searchMatches,
   onSelect, selectedEntityId,
@@ -246,6 +317,35 @@ export function KnowledgeView({
               />
             );
           })}
+          {/* hover edge predicate labels — show predicate text near edge midpoint when an endpoint is hovered */}
+          {hoverId && visibleEdges.map((e, i) => {
+            if (e.src !== hoverId && e.dst !== hoverId) return null;
+            const a = nodePos.get(e.src), b = nodePos.get(e.dst);
+            if (!a || !b) return null;
+            const group = predicateGroupName(e.predicate);
+            if (predicateFilter && !predicateFilter.has(group)) return null;
+            const mx = (a.x + b.x) / 2;
+            const my = (a.y + b.y) / 2;
+            return (
+              <text key={`pl-${i}`}
+                x={mx} y={my}
+                textAnchor="middle"
+                fontSize={10 / transform.k}
+                fontFamily="Inter,sans-serif"
+                fontWeight={600}
+                fill="#fff"
+                opacity={0.85}
+                style={{
+                  paintOrder: "stroke",
+                  stroke: "#000",
+                  strokeWidth: 3 / transform.k,
+                  strokeLinejoin: "round",
+                  pointerEvents: "none",
+                }}
+              >{e.predicate}</text>
+            );
+          })}
+
           {visibleNodes.map(n => {
             const p = nodePos.get(n.id); if (!p) return null;
             const sz = sizeFor(n);
@@ -343,6 +443,43 @@ export function KnowledgeView({
           </div>
         );
       })()}
+
+      {/* Zoom + reset controls (bottom-left) */}
+      <div style={{
+        position: "absolute", left: 16, bottom: 16,
+        display: "flex", flexDirection: "column", gap: 3,
+        background: "rgba(10,10,20,0.85)",
+        backdropFilter: "blur(10px)",
+        borderRadius: 8,
+        border: "1px solid rgba(255,255,255,0.07)",
+        padding: 4,
+      }}>
+        <CtrlBtn title="Zoom in"
+          onClick={() => setTransform(t => ({ ...t, k: Math.min(8, t.k * 1.3) }))}>+</CtrlBtn>
+        <CtrlBtn title="Zoom out"
+          onClick={() => setTransform(t => ({ ...t, k: Math.max(0.3, t.k / 1.3) }))}>−</CtrlBtn>
+        <CtrlBtn title="Reset view"
+          onClick={() => setTransform({ x: 0, y: 0, k: 1 })}>⊙</CtrlBtn>
+      </div>
+
+      {/* Mini-map (bottom-right) */}
+      {visibleNodes.length > 4 && (
+        <Minimap nodes={visibleNodes} nodePos={nodePos}
+          viewport={viewport} transform={transform}
+          colorFor={colorFor} />
+      )}
+
+      {/* Zoom % indicator (top-right) */}
+      <div style={{
+        position: "absolute", right: 16, top: 16,
+        fontSize: 10, color: "#555",
+        fontFamily: "var(--mono)",
+        background: "rgba(10,10,20,0.7)", backdropFilter: "blur(8px)",
+        padding: "4px 8px", borderRadius: 6,
+        border: "1px solid rgba(255,255,255,0.05)",
+        letterSpacing: 0.5,
+        pointerEvents: "none",
+      }}>{Math.round(transform.k * 100)}%</div>
 
       {!data.nodes.length && (
         <div style={{

@@ -16,25 +16,37 @@ export function EntityPanel({ entityProfile, onClose, onPickMemory }) {
       }} />
       <div onClick={(ev) => ev.stopPropagation()} style={{
         position: "absolute", right: 20, top: 20, width: 400, maxHeight: "calc(100vh - 40px)",
-        overflowY: "auto", padding: 20,
+        overflow: "hidden", display: "flex", flexDirection: "column",
         background: "rgba(10,10,20,0.97)",
         border: `1px solid ${color}33`,
         borderRadius: 14, backdropFilter: "blur(20px)",
         boxShadow: "0 16px 56px rgba(0,0,0,0.75)", zIndex: 10,
         animation: "slideIn 0.22s cubic-bezier(.2,.8,.2,1)",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-          <span style={{
-            width: 12, height: 12, borderRadius: "50%",
-            background: color, boxShadow: `0 0 10px ${color}`,
-          }} />
-          <span style={{ fontSize: 16, fontWeight: 800, color: "#e6e6f0" }}>{e.name}</span>
-          <span style={{
-            marginLeft: "auto", fontSize: 9, color: "#666",
-            letterSpacing: 1.2, textTransform: "uppercase",
-          }}>{e.kind || "entity"}</span>
-          <button onClick={onClose} style={closeBtnStyle}>×</button>
-        </div>
+        {/* kind-coloured top stripe */}
+        <div style={{
+          height: 3,
+          background: `linear-gradient(90deg, ${color}, transparent)`,
+        }} />
+
+        <div style={{ overflowY: "auto", padding: 20, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <span style={{
+              width: 14, height: 14, borderRadius: "50%",
+              background: color,
+              boxShadow: `0 0 12px ${color}, 0 0 24px ${color}66`,
+            }} />
+            <span style={{ fontSize: 17, fontWeight: 800, color: "#e6e6f0", letterSpacing: -0.2 }}>
+              {e.name}
+            </span>
+            <span style={{
+              marginLeft: "auto", fontSize: 9, color: color,
+              letterSpacing: 1.4, textTransform: "uppercase", fontWeight: 700,
+              padding: "2px 8px", borderRadius: 10,
+              background: `${color}15`, border: `1px solid ${color}33`,
+            }}>{e.kind || "entity"}</span>
+            <button onClick={onClose} style={closeBtnStyle}>×</button>
+          </div>
 
         <div style={{
           padding: "8px 12px", borderRadius: 6, marginBottom: 14,
@@ -82,6 +94,7 @@ export function EntityPanel({ entityProfile, onClose, onPickMemory }) {
             </div>
           </div>
         )}
+        </div>
       </div>
     </>
   );

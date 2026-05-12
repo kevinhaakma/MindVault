@@ -1,6 +1,42 @@
+/* CSS tokens — base surface stack + accents */
+:root {
+  --bg-0: #050510;
+  --bg-1: #0a0a17;
+  --bg-2: #0e0e1e;
+  --bg-3: #15152b;
+
+  --line-soft:   rgba(255,255,255,0.04);
+  --line:        rgba(255,255,255,0.07);
+  --line-strong: rgba(255,255,255,0.12);
+
+  --text-0: #ffffff;
+  --text-1: #d8d8f0;
+  --text-2: #aab;
+  --text-3: #888;
+  --text-4: #555;
+
+  --accent-blue:   #5b9dff;
+  --accent-purple: #b86bff;
+  --accent-grad:   linear-gradient(135deg, #5b9dff, #b86bff);
+  --accent-text:   linear-gradient(90deg, #d6e3ff, #ead4ff);
+
+  --shadow-card: 0 16px 56px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.02) inset;
+  --shadow-glow: 0 0 32px rgba(91,157,255,0.25);
+
+  --mono: ui-monospace, "SF Mono", "Menlo", "JetBrains Mono", monospace;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: 0.3; transform: scale(1.5); }
+}
+@keyframes breathe {
+  0%, 100% { transform: scale(1);   box-shadow: 0 0 18px rgba(91,157,255,0.55); }
+  50%      { transform: scale(1.06); box-shadow: 0 0 26px rgba(184,107,255,0.65); }
+}
+@keyframes wave-dot {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 1; }
 }
 @keyframes fadeIn {
   from { opacity: 0; }
@@ -15,19 +51,49 @@
   to   { opacity: 1; transform: translateX(0); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes countup {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 .kbd {
   display: inline-block;
   padding: 1px 5px;
-  font-family: ui-monospace, Menlo, monospace;
+  font-family: var(--mono);
   font-size: 9px;
-  color: #888;
+  color: var(--text-3);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 3px;
 }
 
 button:hover { filter: brightness(1.15); }
+
+/* Input focus glow */
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: rgba(91, 157, 255, 0.45) !important;
+  box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.10);
+}
+
+/* Subtle hairline accent on cards */
+.card-accent {
+  position: relative;
+}
+.card-accent::before {
+  content: "";
+  position: absolute; left: 16px; right: 16px; top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(91,157,255,0.4), rgba(184,107,255,0.4), transparent);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.num-mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
 
 ::-webkit-scrollbar          { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track    { background: transparent; }

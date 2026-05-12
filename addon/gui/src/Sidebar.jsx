@@ -32,25 +32,38 @@ export const Sidebar = forwardRef(function Sidebar({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
         <button onClick={onOpenFile} style={{
-          padding: "10px 12px", borderRadius: 8, border: "none", cursor: "pointer",
-          background: "linear-gradient(135deg, rgba(91,157,255,0.20), rgba(184,107,255,0.16))",
-          color: "#cfe0ff", fontSize: 12, fontWeight: 700, letterSpacing: 0.4,
-          boxShadow: "0 4px 14px rgba(91,157,255,0.16)",
-        }}>＋  File memory</button>
+          padding: "11px 14px", borderRadius: 9, border: "none", cursor: "pointer",
+          background: "linear-gradient(135deg, rgba(91,157,255,0.22), rgba(184,107,255,0.18))",
+          color: "#e0eaff", fontSize: 12, fontWeight: 700, letterSpacing: 0.4,
+          boxShadow: "0 4px 16px rgba(91,157,255,0.18), 0 0 0 1px rgba(91,157,255,0.15) inset",
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span style={{ fontSize: 16, lineHeight: 1, color: "#a5c4ff" }}>＋</span>
+          File memory
+          <span className="kbd" style={{ marginLeft: "auto", fontSize: 9 }}>n</span>
+        </button>
         <button onClick={onOpenArchive} style={{
-          padding: "8px 12px", borderRadius: 8, cursor: "pointer",
-          background: "rgba(255,255,255,0.04)", color: "#aab", fontSize: 11, fontWeight: 600,
+          padding: "9px 14px", borderRadius: 9, cursor: "pointer",
+          background: "rgba(255,255,255,0.04)",
+          color: "#aab", fontSize: 11, fontWeight: 600,
           border: "1px solid rgba(255,255,255,0.06)", letterSpacing: 0.3,
-        }}>⬚  Browse {stats?.memories ?? 0} memories</button>
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span style={{ fontSize: 13, color: "#888" }}>⬚</span>
+          Browse <span className="num-mono" style={{ color: "#cfe0ff", fontWeight: 700 }}>{stats?.memories ?? 0}</span> memories
+          <span className="kbd" style={{ marginLeft: "auto", fontSize: 9 }}>a</span>
+        </button>
       </div>
 
-      <div style={{
-        display: "flex", justifyContent: "space-between",
-        padding: "10px 12px", borderRadius: 8,
-        background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)",
+      <div className="card-accent" style={{
+        display: "flex", padding: "14px 4px", borderRadius: 10,
+        background: "linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005))",
+        border: "1px solid rgba(255,255,255,0.05)",
       }}>
         <Stat label="entities" value={stats?.entities ?? 0} color="#7ee787" />
+        <div style={{ width: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }} />
         <Stat label="triples"  value={stats?.triples ?? 0}  color="#b86bff" />
+        <div style={{ width: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }} />
         <Stat label="visible"  value={knowledge.nodes.length} color="#ffb454" />
       </div>
 
@@ -73,17 +86,26 @@ export const Sidebar = forwardRef(function Sidebar({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{
-          display: "flex", alignItems: "center", gap: 8, fontSize: 10, color: "#555",
-          padding: "6px 10px", borderRadius: 6,
-          background: "rgba(126,231,135,0.04)", border: "1px solid rgba(126,231,135,0.12)",
+          display: "flex", alignItems: "center", gap: 10, fontSize: 10,
+          padding: "7px 11px", borderRadius: 7,
+          background: "rgba(126,231,135,0.04)",
+          border: "1px solid rgba(126,231,135,0.12)",
         }}>
+          <span style={{ display: "inline-flex", gap: 3, alignItems: "center" }}>
+            {[0, 1, 2].map(i => (
+              <span key={i} style={{
+                width: 4, height: 4, borderRadius: "50%", background: "#7ee787",
+                boxShadow: "0 0 4px #7ee787",
+                animation: "wave-dot 1.4s ease-in-out infinite",
+                animationDelay: `${i * 0.18}s`,
+              }} />
+            ))}
+          </span>
+          <span style={{ color: "#7ee787", fontWeight: 700, letterSpacing: 1.2 }}>LIVE</span>
           <span style={{
-            width: 6, height: 6, borderRadius: "50%", background: "#7ee787",
-            boxShadow: "0 0 6px #7ee787",
-            animation: "pulse 2s ease-in-out infinite",
-          }} />
-          <span style={{ color: "#7ee787", fontWeight: 600, letterSpacing: 0.5 }}>LIVE</span>
-          <span style={{ marginLeft: "auto", color: "#444" }}>
+            marginLeft: "auto", color: "#444",
+            fontFamily: "var(--mono)", fontSize: 9,
+          }}>
             {lastUpdated ? timeAgo(lastUpdated) : "…"}
           </span>
         </div>
@@ -97,23 +119,25 @@ export const Sidebar = forwardRef(function Sidebar({
 
 function Brand({ version }) {
   return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{
+        width: 32, height: 32, borderRadius: "50%",
+        background: "var(--accent-grad)",
+        boxShadow: "0 0 18px rgba(91,157,255,0.55)",
+        animation: "breathe 4s ease-in-out infinite",
+      }} />
+      <div>
         <div style={{
-          width: 30, height: 30, borderRadius: "50%",
-          background: "linear-gradient(135deg, #5b9dff, #b86bff)",
-          boxShadow: "0 0 18px rgba(91,157,255,0.55)",
-        }} />
-        <div>
-          <div style={{
-            fontSize: 19, fontWeight: 800, letterSpacing: 0.3,
-            background: "linear-gradient(90deg, #d6e3ff, #ead4ff)",
-            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-            backgroundClip: "text",
-          }}>MindVault</div>
-          <div style={{ fontSize: 9, color: "#555", letterSpacing: 1.2, textTransform: "uppercase" }}>
-            Vex archive {version && `· v${version}`}
-          </div>
+          fontSize: 20, fontWeight: 800, letterSpacing: -0.3,
+          background: "var(--accent-text)",
+          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          backgroundClip: "text", lineHeight: 1,
+        }}>MindVault</div>
+        <div style={{
+          fontSize: 9, color: "#555", letterSpacing: 1.6,
+          textTransform: "uppercase", marginTop: 4, fontWeight: 600,
+        }}>
+          Vex archive {version && <span style={{ color: "#777", fontFamily: "var(--mono)" }}>· v{version}</span>}
         </div>
       </div>
     </div>
@@ -127,20 +151,30 @@ const SearchBox = forwardRef(function SearchBox({ value, onChange }, ref) {
         ref={ref}
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="Search entities + memories…  ( / )"
-        style={{ ...inputStyle, paddingLeft: 30, paddingRight: value ? 28 : 11 }}
+        placeholder="Search entities + memories"
+        style={{
+          ...inputStyle,
+          paddingLeft: 30,
+          paddingRight: value ? 28 : 32,
+          fontSize: 12,
+        }}
       />
-      {value && (
+      <span style={{
+        position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)",
+        fontSize: 13, color: "#555", pointerEvents: "none",
+      }}>⌕</span>
+      {value ? (
         <button onClick={() => onChange("")} style={{
           position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
           background: "none", border: "none", color: "#666", cursor: "pointer",
           fontSize: 14, padding: "4px 6px", lineHeight: 1,
         }} title="Clear (Esc)">×</button>
+      ) : (
+        <span className="kbd" style={{
+          position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+          fontSize: 9, pointerEvents: "none",
+        }}>/</span>
       )}
-      <span style={{
-        position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)",
-        fontSize: 13, color: "#444", pointerEvents: "none",
-      }}>⌕</span>
     </div>
   );
 });

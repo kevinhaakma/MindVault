@@ -30,8 +30,13 @@ export const closeBtnStyle = {
 export function Stat({ label, value, color }) {
   return (
     <div style={{ textAlign: "center", flex: 1 }}>
-      <div style={{ fontSize: 18, fontWeight: 700, color }}>{value}</div>
-      <div style={{ fontSize: 9, color: "#555", textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+      <div className="num-mono" style={{ fontSize: 22, fontWeight: 700, color, lineHeight: 1 }}>
+        {value}
+      </div>
+      <div style={{
+        fontSize: 9, color: "#555", textTransform: "uppercase",
+        letterSpacing: 1.4, marginTop: 4, fontWeight: 600,
+      }}>{label}</div>
     </div>
   );
 }
