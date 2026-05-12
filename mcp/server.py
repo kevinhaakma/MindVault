@@ -137,9 +137,35 @@ async def list_tools() -> list[Tool]:
     ]
 
 
+_session_cookie: Optional[str] = None
+
+
+async def _login(client) -> Optional[str]:
+    """Login with MINDVAULT_PASSWORD env (if set); cache cookie."""
+    global _session_cookie
+    pw = os.environ.get("MINDVAULT_PASSWORD", "")
+    if not pw:
+        return None
+    r = await client.post(f"{BACKEND}/api/login", json={"password": pw})
+    if r.status_code == 200:
+        _session_cookie = r.cookies.get("vex_session")
+        return _session_cookie
+    return None
+
+
 async def _http(method: str, path: str, **kwargs) -> dict:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.request(method, f"{BACKEND}{path}", **kwargs)
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        # Attach cached cookie if we have one
+        cookies = dict(kwargs.pop("cookies", {}) or {})
+        if _session_cookie:
+            cookies["vex_session"] = _session_cookie
+        r = await client.request(method, f"{BACKEND}{path}", cookies=cookies, **kwargs)
+        # If unauthorized, login and retry once
+        if r.status_code == 401:
+            ck = await _login(client)
+            if ck:
+                cookies["vex_session"] = ck
+                r = await client.request(method, f"{BACKEND}{path}", cookies=cookies, **kwargs)
         r.raise_for_status()
         return r.json()
 
