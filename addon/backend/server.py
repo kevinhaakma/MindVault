@@ -324,7 +324,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.35"
+VERSION = "0.1.36"
 
 
 @router.get("/health")
@@ -966,6 +966,75 @@ def knowledge_graph(kind: Optional[str] = None, limit: int = 1000):
         })
 
     return {"nodes": nodes, "edges": edges, "literals": literals}
+
+
+class MergeRequest(BaseModel):
+    from_id: str
+    into_id: str
+
+
+@router.post("/entities/merge")
+def merge_entities(req: MergeRequest):
+    """Absorb `from_id` into `into_id`. All triples rewritten, mention_count summed, from-entity deleted."""
+    _require_db()
+    if req.from_id == req.into_id:
+        return {"ok": True, "noop": True}
+    src = sql.execute("SELECT * FROM entities WHERE id = ?", (req.from_id,)).fetchone()
+    dst = sql.execute("SELECT * FROM entities WHERE id = ?", (req.into_id,)).fetchone()
+    if not src or not dst:
+        raise HTTPException(404, "entity not found")
+    moved = 0
+    skipped = 0
+    with tx() as c:
+        # rewrite triples where from is subject — but skip ones that would create a self-loop
+        src_subj = c.execute("SELECT * FROM triples WHERE subj_id = ?", (req.from_id,)).fetchall()
+        for t in src_subj:
+            new_obj = req.into_id if t["obj_id"] == req.from_id else t["obj_id"]
+            if req.into_id == new_obj:
+                # would be self-loop, skip
+                skipped += 1
+                continue
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO triples "
+                    "(subj_id, predicate, obj_id, obj_literal, weight, source_memory_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (req.into_id, t["predicate"], new_obj, t["obj_literal"],
+                     t["weight"], t["source_memory_id"], t["created_at"]),
+                )
+                moved += 1
+            except Exception:
+                skipped += 1
+        # rewrite triples where from is object
+        src_obj = c.execute("SELECT * FROM triples WHERE obj_id = ?", (req.from_id,)).fetchall()
+        for t in src_obj:
+            new_subj = req.into_id if t["subj_id"] == req.from_id else t["subj_id"]
+            if new_subj == req.into_id:
+                skipped += 1
+                continue
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO triples "
+                    "(subj_id, predicate, obj_id, obj_literal, weight, source_memory_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (new_subj, t["predicate"], req.into_id, t["obj_literal"],
+                     t["weight"], t["source_memory_id"], t["created_at"]),
+                )
+                moved += 1
+            except Exception:
+                skipped += 1
+        # delete from-entity's triples + the entity itself
+        c.execute("DELETE FROM triples WHERE subj_id = ? OR obj_id = ?", (req.from_id, req.from_id))
+        # transfer mention_count
+        c.execute(
+            "UPDATE entities SET mention_count = mention_count + ? WHERE id = ?",
+            (src["mention_count"] or 0, req.into_id),
+        )
+        # if dst has no kind but src did, copy
+        if not dst["kind"] and src["kind"]:
+            c.execute("UPDATE entities SET kind = ? WHERE id = ?", (src["kind"], req.into_id))
+        c.execute("DELETE FROM entities WHERE id = ?", (req.from_id,))
+    return {"ok": True, "moved": moved, "skipped": skipped}
 
 
 @router.get("/entity/{entity_id}")

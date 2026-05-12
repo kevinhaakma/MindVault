@@ -96,15 +96,17 @@ export function KnowledgeView({
     return () => ro.disconnect();
   }, []);
 
-  // sim sync
+  // sim sync — also stamps mass derived from mention_count
   useEffect(() => {
     const next = new Map();
+    const maxM = Math.max(1, ...data.nodes.map(n => n.mention_count || 0));
     for (const n of data.nodes) {
+      const mass = 1 + 2.5 * (n.mention_count || 0) / maxM;  // 1..3.5
       const ex = simRef.current.get(n.id);
-      if (ex) next.set(n.id, ex);
+      if (ex) { ex.mass = mass; next.set(n.id, ex); }
       else {
         const angle = Math.random() * Math.PI * 2;
-        next.set(n.id, { x: Math.cos(angle) * 0.4, y: Math.sin(angle) * 0.4, vx: 0, vy: 0 });
+        next.set(n.id, { x: Math.cos(angle) * 0.4, y: Math.sin(angle) * 0.4, vx: 0, vy: 0, mass });
       }
     }
     simRef.current = next;
@@ -187,14 +189,14 @@ export function KnowledgeView({
           const b = arr[j];
           let dx = b.x - a.x, dy = b.y - a.y;
           let d2 = dx * dx + dy * dy;
-          // floor distance² so coincident nodes don't blow up
           if (d2 < MIN_D2) {
-            // also nudge if exactly coincident
             if (d2 < 1e-6) { dx = (Math.random() - 0.5) * 0.05; dy = (Math.random() - 0.5) * 0.05; }
             d2 = MIN_D2;
           }
           const d = Math.sqrt(d2);
-          let f = REPEL / d2;
+          // mass-weighted: hubs push more, satellites push less
+          const mass = (a.mass || 1) * (b.mass || 1);
+          let f = REPEL * mass / d2;
           if (f > MAX_F) f = MAX_F;
           const fx = (dx / d) * f, fy = (dy / d) * f;
           a.vx -= fx; a.vy -= fy;
@@ -309,14 +311,16 @@ export function KnowledgeView({
     return s;
   }, [hoverId, visibleEdges]);
 
-  // Always-label: top-mention nodes, but skip if a higher-priority label is too close (avoid overlap).
+  // Always-label: hubs only — top 20%, capped at 20. Collision-pruned to avoid overlap.
   const alwaysLabel = useMemo(() => {
     const sorted = [...visibleNodes].sort((a, b) => (b.mention_count || 0) - (a.mention_count || 0));
-    const candidates = sorted.slice(0, Math.min(visibleNodes.length, Math.max(12, Math.floor(visibleNodes.length * 0.4))));
-    const MIN_LABEL_DIST = 38 / Math.max(transform.k, 0.5); // pixel space — scale-adjusted
-    const placed = []; // [{x, y}]
+    const budget = Math.min(20, Math.max(8, Math.floor(visibleNodes.length * 0.2)));
+    const candidates = sorted.slice(0, budget * 2); // try more, prune by collision
+    const MIN_LABEL_DIST = 56 / Math.max(transform.k, 0.5);
+    const placed = [];
     const kept = new Set();
     for (const n of candidates) {
+      if (kept.size >= budget) break;
       const p = nodePos.get(n.id);
       if (!p) continue;
       let tooClose = false;
@@ -360,9 +364,17 @@ export function KnowledgeView({
             const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
             const dim = (hoverId && !involved) || pf;
             const offset = -((time * 18) % 20);
+            // bezier curve: control point offset perpendicular to line, deterministic by index
+            const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const len = Math.sqrt(dx * dx + dy * dy) || 1;
+            const curve = ((i % 2) ? 1 : -1) * Math.min(40, len * 0.12);
+            const cx2 = mx + (-dy / len) * curve;
+            const cy2 = my + ( dx / len) * curve;
             return (
-              <line key={i}
-                x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              <path key={i}
+                d={`M ${a.x} ${a.y} Q ${cx2} ${cy2} ${b.x} ${b.y}`}
+                fill="none"
                 stroke={predicateColor(e.predicate)}
                 strokeWidth={(1.0 + 1.6 * (e.weight || 0.5)) * (involved ? 1.8 : 1)}
                 strokeDasharray="10 5"
