@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
-import { forceX, forceY } from "d3-force";
+import { forceX, forceY, forceCollide } from "d3-force";
 import {
   ENTITY_KIND_COLORS,
   predicateColor, predicateGroupName, PREDICATE_GROUPS,
@@ -8,11 +8,11 @@ import {
 
 // Each entity kind gets a deterministic anchor on a wide ring — clusters separate visually
 const KIND_LIST = Object.keys(ENTITY_KIND_COLORS);
-const CLUSTER_RADIUS = 360;
+const CLUSTER_RADIUS = 520;
 function kindAnchor(kind) {
   const idx = KIND_LIST.indexOf(kind);
   if (idx < 0) return { x: 0, y: 0 };
-  const angle = (idx / KIND_LIST.length) * Math.PI * 2;
+  const angle = (idx / KIND_LIST.length) * Math.PI * 2 - Math.PI / 2; // start at top
   return { x: Math.cos(angle) * CLUSTER_RADIUS, y: Math.sin(angle) * CLUSTER_RADIUS };
 }
 
@@ -210,16 +210,16 @@ export function KnowledgeView({
   useEffect(() => {
     if (!fgRef.current) return;
     const fg = fgRef.current;
-    // stronger repulsion + longer max range → groups spread out
-    fg.d3Force("charge")?.strength(-280).distanceMax(500);
-    // longer edges → satellites don't pile onto hubs
-    fg.d3Force("link")?.distance(120).strength(0.35);
-    // weaken center, let kind anchors do the work
-    if (fg.d3Force("center")) fg.d3Force("center").strength(0.02);
-    // kind clustering — pull each node to its kind anchor on a wide ring
-    fg.d3Force("kindX", forceX(n => kindAnchor(n.kind).x).strength(0.08));
-    fg.d3Force("kindY", forceY(n => kindAnchor(n.kind).y).strength(0.08));
-    // re-heat once so the new forces take effect
+    // strong charge repulsion + long range so clusters keep distance
+    fg.d3Force("charge")?.strength(-420).distanceMax(700);
+    // moderate link distance — within-cluster links not too tight
+    fg.d3Force("link")?.distance(95).strength(0.3);
+    if (fg.d3Force("center")) fg.d3Force("center").strength(0.01);
+    // kind clustering — pull each node toward its kind anchor on the wide ring
+    fg.d3Force("kindX", forceX(n => kindAnchor(n.kind).x).strength(0.18));
+    fg.d3Force("kindY", forceY(n => kindAnchor(n.kind).y).strength(0.18));
+    // hard collision — nodes can't overlap (radius scales with mention_count)
+    fg.d3Force("collide", forceCollide(n => 12 + n.val * 3).strength(0.95).iterations(2));
     fg.d3ReheatSimulation();
   }, [graphData.nodes.length]);
 
