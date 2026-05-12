@@ -10,6 +10,9 @@ RUN npm run build
 # Stage 2: runtime — single process (uvicorn serves GUI + API)
 FROM python:3.11-slim
 
+# jq for parsing addon options at runtime
+RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app/backend
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

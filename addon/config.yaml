@@ -3,7 +3,7 @@ description: >
   Vex — persistent memory + knowledge graph for code agents.
   Stores memories in SQLite + vector embeddings, visualizes them as a constellation.
   Exposes recall/remember/get_secret via MCP for Claude Code and other agents.
-version: "0.1.25"
+version: "0.1.26"
 slug: "mindvault"
 url: "https://github.com/kevinhaakma/mindvault"
 init: false
@@ -42,5 +42,7 @@ ports_description:
 map:
   - data:rw
 
-options: {}
-schema: {}
+options:
+  password: ""
+schema:
+  password: password?

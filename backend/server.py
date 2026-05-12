@@ -9,9 +9,12 @@ Three-tier memory:
 Vectors stored as float32 BLOBs in SQLite — no lancedb/rust required.
 fastembed is optional: if onnxruntime crashes, falls back to keyword-only.
 """
+import hashlib
+import hmac
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -21,9 +24,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -297,7 +300,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.25"
+VERSION = "0.1.26"
 
 
 @router.get("/health")
@@ -313,6 +316,106 @@ def health():
 @router.get("/version")
 def version():
     return {"version": VERSION}
+
+
+# ── auth ─────────────────────────────────────────────────────────────────────
+_AUTH_PASSWORD = os.environ.get("MINDVAULT_PASSWORD", "").strip()
+_AUTH_SECRET   = os.environ.get("MINDVAULT_SECRET", "").strip() or secrets.token_hex(32)
+_SESSION_TTL   = 30 * 86400  # 30 days
+_AUTH_PASSWORD_HASH = hashlib.sha256(_AUTH_PASSWORD.encode()).hexdigest() if _AUTH_PASSWORD else ""
+
+
+def _sign(payload: str) -> str:
+    return hmac.new(_AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _make_token() -> str:
+    ts = str(int(time.time()))
+    payload = f"{ts}.{_AUTH_PASSWORD_HASH}"
+    return f"{payload}.{_sign(payload)}"
+
+
+def _verify_token(token: str) -> bool:
+    if not _AUTH_PASSWORD:
+        return True
+    if not token:
+        return False
+    try:
+        ts_str, ph, sig = token.split(".", 2)
+        if not hmac.compare_digest(_sign(f"{ts_str}.{ph}"), sig):
+            return False
+        if int(ts_str) + _SESSION_TTL < time.time():
+            return False
+        if ph != _AUTH_PASSWORD_HASH:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+@router.post("/login")
+def login(req: LoginRequest, response: Response):
+    if not _AUTH_PASSWORD:
+        return {"ok": True, "auth_required": False}
+    # constant-time compare
+    if not hmac.compare_digest(req.password, _AUTH_PASSWORD):
+        raise HTTPException(401, "Wrong password")
+    token = _make_token()
+    response.set_cookie(
+        "vex_session", token,
+        max_age=_SESSION_TTL,
+        httponly=True,
+        samesite="lax",
+        secure=False,   # nginx terminates TLS — cookie travels http inside docker net
+        path="/",
+    )
+    return {"ok": True}
+
+
+@router.post("/logout")
+def logout(response: Response):
+    response.delete_cookie("vex_session", path="/")
+    return {"ok": True}
+
+
+@router.get("/me")
+def me(request: Request):
+    if not _AUTH_PASSWORD:
+        return {"authenticated": True, "auth_required": False}
+    token = request.cookies.get("vex_session", "")
+    return {"authenticated": _verify_token(token), "auth_required": True}
+
+
+# Public API routes that work without auth (login flow + meta)
+_PUBLIC_API = {
+    "/login", "/logout", "/me", "/health", "/version",
+    "/api/login", "/api/logout", "/api/me", "/api/health", "/api/version",
+}
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if not _AUTH_PASSWORD:
+        return await call_next(request)
+    path = request.url.path
+    # Only gate API routes — static SPA must load so the login screen can render
+    is_api = path.startswith("/api/") or path in _PUBLIC_API or path in {
+        "/write", "/recall", "/graph", "/stats", "/backup", "/backups",
+        "/relink", "/prune-orphans",
+    }
+    if not is_api:
+        return await call_next(request)
+    if path in _PUBLIC_API:
+        return await call_next(request)
+    # also allow /api/memory/{id} and /api/supervisor/... under same gate
+    token = request.cookies.get("vex_session", "")
+    if not _verify_token(token):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 # ── supervisor passthrough (requires hassio_api: true in config.yaml) ────────
