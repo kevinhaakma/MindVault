@@ -85,6 +85,7 @@ export function KnowledgeView({
 
   // ── Custom node painter ─────────────────────────────────────────────────
   const drawNode = useCallback((node, ctx, scale) => {
+    if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
     const dim     = neighbors && !neighbors.has(node.id);
     const isMatch = searchMatches?.has(node.id);
     const isSel   = node.id === selectedEntityId;
@@ -146,7 +147,8 @@ export function KnowledgeView({
   const drawLink = useCallback((link, ctx, scale) => {
     const sx = link.source.x, sy = link.source.y;
     const tx = link.target.x, ty = link.target.y;
-    if (sx === undefined || tx === undefined) return;
+    if (!Number.isFinite(sx) || !Number.isFinite(sy) ||
+        !Number.isFinite(tx) || !Number.isFinite(ty)) return;
     const sId = typeof link.source === "object" ? link.source.id : link.source;
     const tId = typeof link.target === "object" ? link.target.id : link.target;
     const pf  = predicateFilter && !predicateFilter.has(link._group);
@@ -236,6 +238,7 @@ export function KnowledgeView({
         linkTarget="target"
         nodeCanvasObject={drawNode}
         nodePointerAreaPaint={(node, color, ctx) => {
+          if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
           const r = (3 + node.val * 1.5) * 1.8;
           ctx.fillStyle = color;
           ctx.beginPath();
