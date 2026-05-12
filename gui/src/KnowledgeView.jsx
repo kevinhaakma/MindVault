@@ -311,26 +311,57 @@ export function KnowledgeView({
     return s;
   }, [hoverId, visibleEdges]);
 
-  // Always-label: hubs only — top 20%, capped at 20. Collision-pruned to avoid overlap.
+  // Selected-focus: persistent dim of non-neighbors when an entity is clicked.
+  const selectedNeighbors = useMemo(() => {
+    if (!selectedEntityId) return null;
+    const s = new Set([selectedEntityId]);
+    visibleEdges.forEach(e => {
+      if (e.src === selectedEntityId) s.add(e.dst);
+      if (e.dst === selectedEntityId) s.add(e.src);
+    });
+    return s;
+  }, [selectedEntityId, visibleEdges]);
+
+  // Combined dim test — non-neighbor of (hover OR selection)
+  const isDim = (id) => {
+    if (hoverNeighbors)    return !hoverNeighbors.has(id);
+    if (selectedNeighbors) return !selectedNeighbors.has(id);
+    return false;
+  };
+  const edgeDim = (e) => {
+    if (hoverNeighbors)    return !(hoverNeighbors.has(e.src) && hoverNeighbors.has(e.dst));
+    if (selectedNeighbors) return !(selectedNeighbors.has(e.src) && selectedNeighbors.has(e.dst));
+    return false;
+  };
+
+  // Always-label: ALL project entities (they're anchors) + top-mention non-projects.
+  // Collision-pruned. Project labels never get pruned (higher priority).
   const alwaysLabel = useMemo(() => {
-    const sorted = [...visibleNodes].sort((a, b) => (b.mention_count || 0) - (a.mention_count || 0));
-    const budget = Math.min(20, Math.max(8, Math.floor(visibleNodes.length * 0.2)));
-    const candidates = sorted.slice(0, budget * 2); // try more, prune by collision
-    const MIN_LABEL_DIST = 56 / Math.max(transform.k, 0.5);
+    const projects = visibleNodes.filter(n => n.kind === "project");
+    const others   = visibleNodes
+      .filter(n => n.kind !== "project")
+      .sort((a, b) => (b.mention_count || 0) - (a.mention_count || 0));
+    const MIN_LABEL_DIST = 70 / Math.max(transform.k, 0.5);
     const placed = [];
     const kept = new Set();
-    for (const n of candidates) {
-      if (kept.size >= budget) break;
-      const p = nodePos.get(n.id);
-      if (!p) continue;
+    // projects first — they always win
+    for (const n of projects) {
+      const p = nodePos.get(n.id); if (!p) continue;
+      placed.push(p); kept.add(n.id);
+    }
+    // other hubs fill remaining space
+    const budget = 10;
+    let added = 0;
+    for (const n of others) {
+      if (added >= budget) break;
+      const p = nodePos.get(n.id); if (!p) continue;
       let tooClose = false;
       for (const q of placed) {
         const dx = p.x - q.x, dy = p.y - q.y;
         if (dx * dx + dy * dy < MIN_LABEL_DIST * MIN_LABEL_DIST) { tooClose = true; break; }
       }
       if (!tooClose) {
-        placed.push(p);
-        kept.add(n.id);
+        placed.push(p); kept.add(n.id); added++;
       }
     }
     return kept;
@@ -361,14 +392,14 @@ export function KnowledgeView({
             if (!a || !b) return null;
             const group = predicateGroupName(e.predicate);
             const pf = predicateFilter && !predicateFilter.has(group);
-            const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
-            const dim = (hoverId && !involved) || pf;
+            const involved = !edgeDim(e);
+            const dim = edgeDim(e) || pf;
             const offset = -((time * 18) % 20);
-            // bezier curve: control point offset perpendicular to line, deterministic by index
+            // gentle bezier — much subtler than before
             const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
             const dx = b.x - a.x, dy = b.y - a.y;
             const len = Math.sqrt(dx * dx + dy * dy) || 1;
-            const curve = ((i % 2) ? 1 : -1) * Math.min(40, len * 0.12);
+            const curve = ((i % 2) ? 1 : -1) * Math.min(18, len * 0.05);
             const cx2 = mx + (-dy / len) * curve;
             const cy2 = my + ( dx / len) * curve;
             return (
@@ -380,26 +411,27 @@ export function KnowledgeView({
                 strokeDasharray="10 5"
                 strokeDashoffset={offset}
                 strokeLinecap="round"
-                opacity={dim ? (pf ? 0.04 : 0.08) : 1}
+                opacity={dim ? (pf ? 0.03 : 0.05) : 1}
               />
             );
           })}
           {visibleNodes.map(n => {
             const p = nodePos.get(n.id); if (!p) return null;
             const sz = sizeFor(n);
-            const dim = hoverId && !hoverNeighbors?.has(n.id);
+            const dim = isDim(n.id);
             return (
               <circle key={`h-${n.id}`}
                 cx={p.x} cy={p.y} r={sz * 3.2}
                 fill={`url(#eglow-${n.kind || "tech"})`}
-                opacity={dim ? 0.06 : 0.55}
+                opacity={dim ? 0.04 : 0.55}
                 pointerEvents="none"
               />
             );
           })}
-          {/* hover edge predicate labels — show predicate text near edge midpoint when an endpoint is hovered */}
-          {hoverId && visibleEdges.map((e, i) => {
-            if (e.src !== hoverId && e.dst !== hoverId) return null;
+          {/* edge predicate labels — when hover OR select pins an endpoint */}
+          {(hoverId || selectedEntityId) && visibleEdges.map((e, i) => {
+            const focus = hoverId || selectedEntityId;
+            if (e.src !== focus && e.dst !== focus) return null;
             const a = nodePos.get(e.src), b = nodePos.get(e.dst);
             if (!a || !b) return null;
             const group = predicateGroupName(e.predicate);
@@ -432,7 +464,7 @@ export function KnowledgeView({
             const isHover = hoverId === n.id;
             const isSel   = selectedEntityId === n.id;
             const isMatch = searchMatches?.has(n.id);
-            const dim = hoverId && !hoverNeighbors?.has(n.id);
+            const dim = isDim(n.id);
             const labelOn = isHover || isSel || isMatch || alwaysLabel.has(n.id);
             const matchPulse = isMatch ? (1 + 0.25 * Math.sin(time * 2.4 + sz)) : 1;
             return (
