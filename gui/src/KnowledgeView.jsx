@@ -154,14 +154,14 @@ export function KnowledgeView({
     let raf;
     let last = performance.now();
     const start = last;
-    const REPEL = 0.022, SPRING = 1.4, IDEAL = 0.26, DAMP = 0.85, GRAVITY = 0.22,
-          MAX_V = 1.4, SIM_K = 6, KIND_PULL = 0.0018;
+    const REPEL = 0.020, SPRING = 1.7, IDEAL = 0.20, DAMP = 0.85, GRAVITY = 0.18,
+          MAX_V = 1.4, SIM_K = 6, KIND_PULL = 0.012;
     const kindAnchor = (k) => {
       const kinds = Object.keys(ENTITY_KIND_COLORS);
       const idx = kinds.indexOf(k);
       if (idx < 0) return { ax: 0, ay: 0 };
       const angle = (idx / kinds.length) * Math.PI * 2;
-      return { ax: Math.cos(angle) * 0.55, ay: Math.sin(angle) * 0.55 };
+      return { ax: Math.cos(angle) * 0.65, ay: Math.sin(angle) * 0.65 };
     };
     const kindById = new Map();
     data.nodes.forEach(n => kindById.set(n.id, n.kind || "other"));
@@ -202,8 +202,8 @@ export function KnowledgeView({
         const a = kindAnchor(k);
         n.vx += -n.x * GRAVITY * dt;
         n.vy += -n.y * GRAVITY * dt;
-        n.vx += (a.ax - n.x) * KIND_PULL;
-        n.vy += (a.ay - n.y) * KIND_PULL;
+        n.vx += (a.ax - n.x) * KIND_PULL * dt * 60;
+        n.vy += (a.ay - n.y) * KIND_PULL * dt * 60;
         n.vx *= DAMP; n.vy *= DAMP;
         if (n.vx >  MAX_V) n.vx =  MAX_V;
         if (n.vx < -MAX_V) n.vx = -MAX_V;
@@ -219,8 +219,8 @@ export function KnowledgeView({
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // positions
-  const scale = Math.min(viewport.w, viewport.h) * 0.4;
+  // positions — scale so graph fills the viewport more aggressively
+  const scale = Math.min(viewport.w, viewport.h) * 0.5;
   const cx = viewport.w / 2;
   const cy = viewport.h / 2;
   const nodePos = useMemo(() => {
@@ -235,8 +235,39 @@ export function KnowledgeView({
   }, [data.nodes, viewport.w, viewport.h, time]);
 
   const maxMention = Math.max(1, ...data.nodes.map(n => n.mention_count || 0));
-  const sizeFor  = (n) => 4 + 14 * Math.sqrt((n.mention_count || 1) / maxMention);
+  const sizeFor  = (n) => 6 + 18 * Math.sqrt((n.mention_count || 1) / maxMention);
   const colorFor = (n) => ENTITY_KIND_COLORS[n.kind] || "#888";
+
+  // Auto-fit on first stable layout
+  const didFitRef = useRef(false);
+  useEffect(() => {
+    if (didFitRef.current) return;
+    if (data.nodes.length === 0) return;
+    // wait ~1.2s for sim to settle before fitting
+    const t = setTimeout(() => {
+      if (didFitRef.current) return;
+      const positions = data.nodes.map(n => nodePos.get(n.id)).filter(Boolean);
+      if (!positions.length) return;
+      const xs = positions.map(p => p.x), ys = positions.map(p => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const w = maxX - minX, h = maxY - minY;
+      if (!w || !h) return;
+      const pad = 80;
+      const sx = (viewport.w - pad * 2) / w;
+      const sy = (viewport.h - pad * 2) / h;
+      const k = Math.min(sx, sy, 1.6);
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      setTransform({
+        k,
+        x: viewport.w / 2 - midX * k,
+        y: viewport.h / 2 - midY * k,
+      });
+      didFitRef.current = true;
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [data.nodes.length, viewport.w, viewport.h]);
 
   // kind-filter visibility
   const visibleNodeIds = useMemo(() => {
@@ -263,9 +294,11 @@ export function KnowledgeView({
     return s;
   }, [hoverId, visibleEdges]);
 
+  // Always label hubs (top N), or any node big enough at current zoom
   const alwaysLabel = useMemo(() => {
     const sorted = [...visibleNodes].sort((a, b) => (b.mention_count || 0) - (a.mention_count || 0));
-    return new Set(sorted.slice(0, 12).map(n => n.id));
+    const topN = Math.min(visibleNodes.length, Math.max(12, Math.floor(visibleNodes.length * 0.4)));
+    return new Set(sorted.slice(0, topN).map(n => n.id));
   }, [visibleNodes]);
 
   return (
@@ -273,6 +306,9 @@ export function KnowledgeView({
       position: "absolute", inset: 0,
       cursor: dragRef.current ? "grabbing" : "grab",
       userSelect: "none",
+      background:
+        "radial-gradient(circle, rgba(255,255,255,0.025) 1px, transparent 1px) 0 0 / 32px 32px," +
+        "radial-gradient(ellipse at 50% 50%, rgba(91,157,255,0.04), transparent 70%)",
     }}>
       <svg width={viewport.w} height={viewport.h} style={{ display: "block" }}>
         <defs>
@@ -297,10 +333,11 @@ export function KnowledgeView({
               <line key={i}
                 x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                 stroke={predicateColor(e.predicate)}
-                strokeWidth={(0.6 + 1.1 * (e.weight || 0.5)) * (involved ? 2 : 1)}
-                strokeDasharray="8 4"
+                strokeWidth={(1.0 + 1.6 * (e.weight || 0.5)) * (involved ? 1.8 : 1)}
+                strokeDasharray="10 5"
                 strokeDashoffset={offset}
-                opacity={dim ? (pf ? 0.04 : 0.06) : 1}
+                strokeLinecap="round"
+                opacity={dim ? (pf ? 0.04 : 0.08) : 1}
               />
             );
           })}
@@ -376,14 +413,15 @@ export function KnowledgeView({
                 />
                 {labelOn && (
                   <text
-                    x={p.x} y={p.y + sz + 11 / transform.k}
+                    x={p.x} y={p.y + sz + 13 / transform.k}
                     textAnchor="middle"
-                    fill={isHover || isSel ? "#fff" : "#aab"}
-                    fontSize={11 / transform.k}
+                    fill={isHover || isSel ? "#fff" : "#c0c0d8"}
+                    fontSize={12 / transform.k}
                     fontFamily="Inter,sans-serif"
-                    fontWeight={isHover || isSel ? 700 : 500}
-                    opacity={dim ? 0.3 : 0.95}
-                    style={{ paintOrder: "stroke", stroke: "#000", strokeWidth: 3 / transform.k, strokeLinejoin: "round" }}
+                    fontWeight={isHover || isSel ? 800 : 600}
+                    letterSpacing={-0.2}
+                    opacity={dim ? 0.3 : 1}
+                    style={{ paintOrder: "stroke", stroke: "#000", strokeWidth: 3.2 / transform.k, strokeLinejoin: "round" }}
                   >{n.name}</text>
                 )}
               </g>
@@ -460,6 +498,26 @@ export function KnowledgeView({
           onClick={() => setTransform(t => ({ ...t, k: Math.max(0.3, t.k / 1.3) }))}>−</CtrlBtn>
         <CtrlBtn title="Reset view"
           onClick={() => setTransform({ x: 0, y: 0, k: 1 })}>⊙</CtrlBtn>
+        <CtrlBtn title="Fit to view"
+          onClick={() => {
+            const positions = data.nodes.map(n => nodePos.get(n.id)).filter(Boolean);
+            if (!positions.length) return;
+            const xs = positions.map(p => p.x), ys = positions.map(p => p.y);
+            const minX = Math.min(...xs), maxX = Math.max(...xs);
+            const minY = Math.min(...ys), maxY = Math.max(...ys);
+            const w = maxX - minX, h = maxY - minY;
+            const pad = 80;
+            const sx = (viewport.w - pad * 2) / Math.max(w, 1);
+            const sy = (viewport.h - pad * 2) / Math.max(h, 1);
+            const k = Math.min(sx, sy, 1.8);
+            const midX = (minX + maxX) / 2;
+            const midY = (minY + maxY) / 2;
+            setTransform({
+              k,
+              x: viewport.w / 2 - midX * k,
+              y: viewport.h / 2 - midY * k,
+            });
+          }}>⤢</CtrlBtn>
       </div>
 
       {/* Mini-map (bottom-right) */}
