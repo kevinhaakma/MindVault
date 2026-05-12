@@ -21,7 +21,21 @@ const EDGE_COLORS = {
   cross:    "rgba(184,107,255,0.75)",  // bright purple — bridges projects
 };
 
-const VIEWS = ["constellation", "archive", "file"];
+const VIEWS = ["constellation", "knowledge", "archive", "file"];
+
+const ENTITY_KIND_COLORS = {
+  project:   "#5b9dff",
+  tech:      "#7ee787",
+  tool:      "#ffb454",
+  system:    "#ff6b9d",
+  host:      "#5cdcff",
+  domain:    "#b86bff",
+  card:      "#a0cfff",
+  component: "#888888",
+  person:    "#ff9b54",
+  product:   "#ff6b54",
+  language:  "#9bff9b",
+};
 
 // ── utils ────────────────────────────────────────────────────────────────────
 function heatColor(t) {
@@ -744,6 +758,322 @@ function Field({ label, children }) {
   );
 }
 
+// ── Knowledge view (entity-centric force graph) ──────────────────────────────
+function KnowledgeView({ data, hoverId, setHoverId }) {
+  const wrapRef = useRef(null);
+  const simRef  = useRef(new Map());
+  const edgesRef = useRef(data.edges);
+  const [viewport, setViewport] = useState({ w: 1000, h: 800 });
+  const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
+  const [time, setTime] = useState(0);
+  const dragRef = useRef(null);
+
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const ro = new ResizeObserver(() => setViewport({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    setViewport({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  // sync sim positions from data (preserve existing entries)
+  useEffect(() => {
+    const next = new Map();
+    for (const n of data.nodes) {
+      const ex = simRef.current.get(n.id);
+      if (ex) next.set(n.id, ex);
+      else {
+        const angle = Math.random() * Math.PI * 2;
+        next.set(n.id, {
+          x: Math.cos(angle) * 0.4,
+          y: Math.sin(angle) * 0.4,
+          vx: 0, vy: 0,
+        });
+      }
+    }
+    simRef.current = next;
+    edgesRef.current = data.edges;
+  }, [data]);
+
+  // wheel zoom non-passive
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left - rect.width / 2;
+      const my = e.clientY - rect.top  - rect.height / 2;
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      setTransform(t => {
+        const newK = Math.min(8, Math.max(0.3, t.k * factor));
+        const dk = newK / t.k;
+        return { k: newK, x: mx - (mx - t.x) * dk, y: my - (my - t.y) * dk };
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const handleMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    dragRef.current = { startX: e.clientX, startY: e.clientY, tx: transform.x, ty: transform.y };
+  }, [transform]);
+
+  useEffect(() => {
+    const onMove = (e) => {
+      const d = dragRef.current;
+      if (!d) return;
+      setTransform(t => ({ ...t, x: d.tx + (e.clientX - d.startX), y: d.ty + (e.clientY - d.startY) }));
+    };
+    const onUp = () => { dragRef.current = null; };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  // sim loop
+  useEffect(() => {
+    let raf;
+    let last = performance.now();
+    const start = last;
+    const REPEL = 0.025, SPRING = 1.4, IDEAL = 0.28, DAMP = 0.85, GRAVITY = 0.25, MAX_V = 1.4, SIM_K = 6;
+    const step = () => {
+      const now = performance.now();
+      const dt = Math.min(0.033, (now - last) / 1000);
+      last = now;
+      const m = simRef.current;
+      const arr = [...m.values()];
+      for (let i = 0; i < arr.length; i++) {
+        const a = arr[i];
+        for (let j = i+1; j < arr.length; j++) {
+          const b = arr[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const d2 = dx*dx + dy*dy + 0.001;
+          const d  = Math.sqrt(d2);
+          const f = REPEL / d2;
+          const fx = (dx/d) * f, fy = (dy/d) * f;
+          a.vx -= fx; a.vy -= fy;
+          b.vx += fx; b.vy += fy;
+        }
+      }
+      for (const e of edgesRef.current) {
+        const a = m.get(e.src), b = m.get(e.dst);
+        if (!a || !b) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.sqrt(dx*dx + dy*dy) + 0.001;
+        const force = (d - IDEAL) * SPRING * (e.weight || 0.5);
+        const fx = (dx/d) * force, fy = (dy/d) * force;
+        a.vx += fx; a.vy += fy;
+        b.vx -= fx; b.vy -= fy;
+      }
+      for (const n of arr) {
+        n.vx += -n.x * GRAVITY * dt;
+        n.vy += -n.y * GRAVITY * dt;
+        n.vx *= DAMP; n.vy *= DAMP;
+        if (n.vx > MAX_V) n.vx = MAX_V;
+        if (n.vx < -MAX_V) n.vx = -MAX_V;
+        if (n.vy > MAX_V) n.vy = MAX_V;
+        if (n.vy < -MAX_V) n.vy = -MAX_V;
+        n.x += n.vx * dt * SIM_K;
+        n.y += n.vy * dt * SIM_K;
+      }
+      setTime((now - start) / 1000);
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  const scale = Math.min(viewport.w, viewport.h) * 0.4;
+  const cx = viewport.w / 2;
+  const cy = viewport.h / 2;
+  const nodePos = useMemo(() => {
+    const m = new Map();
+    const sim = simRef.current;
+    for (const n of data.nodes) {
+      const s = sim.get(n.id);
+      if (!s) continue;
+      m.set(n.id, { x: cx + s.x * scale, y: cy + s.y * scale });
+    }
+    return m;
+  }, [data.nodes, viewport.w, viewport.h, time]);
+
+  const maxMention = Math.max(1, ...data.nodes.map(n => n.mention_count || 0));
+  const sizeFor = (n) => 4 + 14 * Math.sqrt((n.mention_count || 1) / maxMention);
+  const colorFor = (n) => ENTITY_KIND_COLORS[n.kind] || "#888";
+
+  const hoverNeighbors = useMemo(() => {
+    if (!hoverId) return null;
+    const s = new Set([hoverId]);
+    data.edges.forEach(e => {
+      if (e.src === hoverId) s.add(e.dst);
+      if (e.dst === hoverId) s.add(e.src);
+    });
+    return s;
+  }, [hoverId, data.edges]);
+
+  return (
+    <div ref={wrapRef}
+      onMouseDown={handleMouseDown}
+      style={{
+        position:"absolute", inset:0,
+        cursor: dragRef.current ? "grabbing" : "grab",
+        userSelect:"none",
+      }}
+    >
+      <svg width={viewport.w} height={viewport.h} style={{ display:"block" }}>
+        <defs>
+          {Object.entries(ENTITY_KIND_COLORS).map(([k,c]) => (
+            <radialGradient key={k} id={`eglow-${k}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%"   stopColor={c} stopOpacity="0.85" />
+              <stop offset="50%"  stopColor={c} stopOpacity="0.35" />
+              <stop offset="100%" stopColor={c} stopOpacity="0" />
+            </radialGradient>
+          ))}
+        </defs>
+        <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
+          {/* edges */}
+          {data.edges.map((e, i) => {
+            const a = nodePos.get(e.src), b = nodePos.get(e.dst);
+            if (!a || !b) return null;
+            const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
+            const dim = hoverId && !involved;
+            const offset = -((time * 18) % 20);
+            return (
+              <line key={i}
+                x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                stroke="rgba(184,164,255,0.5)"
+                strokeWidth={(0.6 + 0.8*(e.weight||0.5)) * (involved ? 2 : 1)}
+                strokeDasharray="8 4"
+                strokeDashoffset={offset}
+                opacity={dim ? 0.06 : 1}
+              />
+            );
+          })}
+          {/* halos */}
+          {data.nodes.map(n => {
+            const p = nodePos.get(n.id);
+            if (!p) return null;
+            const sz = sizeFor(n);
+            const dim = hoverId && !hoverNeighbors?.has(n.id);
+            return (
+              <circle key={`h-${n.id}`}
+                cx={p.x} cy={p.y} r={sz * 3.2}
+                fill={`url(#eglow-${n.kind || "tech"})`}
+                opacity={dim ? 0.06 : 0.55}
+                pointerEvents="none"
+              />
+            );
+          })}
+          {/* nodes */}
+          {data.nodes.map(n => {
+            const p = nodePos.get(n.id);
+            if (!p) return null;
+            const sz = sizeFor(n);
+            const isHover = hoverId === n.id;
+            const dim = hoverId && !hoverNeighbors?.has(n.id);
+            return (
+              <g key={n.id}
+                onMouseEnter={() => setHoverId(n.id)}
+                onMouseLeave={() => setHoverId(null)}
+                style={{ cursor:"pointer" }}
+              >
+                <circle
+                  cx={p.x} cy={p.y} r={sz}
+                  fill={colorFor(n)}
+                  opacity={dim ? 0.25 : 1}
+                  stroke={isHover ? "rgba(255,255,255,0.85)" : "none"}
+                  strokeWidth={1.5}
+                />
+                {(sz > 7 || isHover) && (
+                  <text
+                    x={p.x} y={p.y + sz + 11 / transform.k}
+                    textAnchor="middle"
+                    fill={isHover ? "#fff" : "#bbb"}
+                    fontSize={11 / transform.k}
+                    fontFamily="Inter,sans-serif"
+                    fontWeight={isHover ? 700 : 500}
+                    opacity={dim ? 0.3 : 0.95}
+                    style={{ paintOrder:"stroke", stroke:"#000", strokeWidth: 3/transform.k, strokeLinejoin:"round" }}
+                  >{n.name}</text>
+                )}
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+
+      {/* hover detail card */}
+      {hoverId && (() => {
+        const n = data.nodes.find(x => x.id === hoverId);
+        if (!n) return null;
+        const incoming = data.edges.filter(e => e.dst === n.id);
+        const outgoing = data.edges.filter(e => e.src === n.id);
+        const nameFor = (id) => data.nodes.find(x => x.id === id)?.name || id.slice(0,8);
+        return (
+          <div style={{
+            position:"absolute", top:16, left:16, maxWidth:340,
+            padding:"14px 16px", borderRadius:10, pointerEvents:"none",
+            background:"rgba(10,10,20,0.94)", backdropFilter:"blur(14px)",
+            border:`1px solid ${colorFor(n)}44`,
+            boxShadow:"0 12px 40px rgba(0,0,0,0.6)",
+          }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+              <span style={{
+                width:10, height:10, borderRadius:"50%", background:colorFor(n),
+                boxShadow:`0 0 10px ${colorFor(n)}`,
+              }} />
+              <span style={{ fontSize:14, fontWeight:700, color:"#e6e6f0" }}>{n.name}</span>
+              <span style={{ marginLeft:"auto", fontSize:9, color:"#777", textTransform:"uppercase", letterSpacing:1 }}>
+                {n.kind || "entity"}
+              </span>
+            </div>
+            <div style={{ fontSize:10, color:"#666", marginBottom:8 }}>
+              {n.mention_count} mention{n.mention_count===1?"":"s"} · {incoming.length} incoming · {outgoing.length} outgoing
+            </div>
+            {outgoing.length > 0 && (
+              <div style={{ marginTop:6 }}>
+                <div style={{ fontSize:9, color:"#555", textTransform:"uppercase", letterSpacing:1, marginBottom:4 }}>Outgoing</div>
+                {outgoing.slice(0,6).map((e, i) => (
+                  <div key={i} style={{ fontSize:11, color:"#aaa", lineHeight:1.6 }}>
+                    <span style={{ color:"#7ab8ff" }}>{e.predicate}</span>
+                    <span style={{ color:"#666" }}> → </span>
+                    {nameFor(e.dst)}
+                  </div>
+                ))}
+              </div>
+            )}
+            {incoming.length > 0 && (
+              <div style={{ marginTop:8 }}>
+                <div style={{ fontSize:9, color:"#555", textTransform:"uppercase", letterSpacing:1, marginBottom:4 }}>Incoming</div>
+                {incoming.slice(0,6).map((e, i) => (
+                  <div key={i} style={{ fontSize:11, color:"#aaa", lineHeight:1.6 }}>
+                    {nameFor(e.src)}
+                    <span style={{ color:"#666" }}> ← </span>
+                    <span style={{ color:"#7ab8ff" }}>{e.predicate}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {!data.nodes.length && (
+        <div style={{
+          position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center",
+          color:"#444", pointerEvents:"none", textAlign:"center", fontSize:13, lineHeight:1.7,
+        }}>
+          No entities yet.<br />Agents can call <code>memory/&#123;id&#125;/extract</code> to add structure.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Login screen ─────────────────────────────────────────────────────────────
 function LoginScreen({ onSuccess }) {
   const [pw, setPw] = useState("");
@@ -889,6 +1219,7 @@ function AuthGate({ children }) {
 function MindVaultApp() {
   const [view,            setView]            = useState("constellation");
   const [graph,           setGraph]           = useState({ nodes:[], edges:[] });
+  const [knowledge,       setKnowledge]       = useState({ nodes:[], edges:[] });
   const [projects,        setProjects]        = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
   const [selected,        setSelected]        = useState(null);
@@ -939,6 +1270,11 @@ function MindVaultApp() {
       if (ms !== lastHashRef.current.m || es !== lastHashRef.current.e) {
         lastHashRef.current = { m: ms, e: es };
         await fetchGraph();
+        // also refresh knowledge whenever memories change
+        try {
+          const k = await fetch("/api/knowledge").then(r => r.json());
+          setKnowledge(k);
+        } catch {}
       } else {
         setLastUpdated(Date.now());
       }
@@ -1318,6 +1654,14 @@ function MindVaultApp() {
             hoverId={hoverId}
             setHoverId={setHoverId}
             matchIds={matchIds}
+          />
+        )}
+
+        {view === "knowledge" && (
+          <KnowledgeView
+            data={knowledge}
+            hoverId={hoverId}
+            setHoverId={setHoverId}
           />
         )}
 
