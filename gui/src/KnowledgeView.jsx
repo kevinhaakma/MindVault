@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
+import { forceX, forceY } from "d3-force";
 import {
   ENTITY_KIND_COLORS,
   predicateColor, predicateGroupName, PREDICATE_GROUPS,
 } from "./constants.js";
+
+// Each entity kind gets a deterministic anchor on a wide ring — clusters separate visually
+const KIND_LIST = Object.keys(ENTITY_KIND_COLORS);
+const CLUSTER_RADIUS = 360;
+function kindAnchor(kind) {
+  const idx = KIND_LIST.indexOf(kind);
+  if (idx < 0) return { x: 0, y: 0 };
+  const angle = (idx / KIND_LIST.length) * Math.PI * 2;
+  return { x: Math.cos(angle) * CLUSTER_RADIUS, y: Math.sin(angle) * CLUSTER_RADIUS };
+}
 
 export function KnowledgeView({
   data, hoverId, setHoverId, kindFilter, predicateFilter, searchMatches,
@@ -195,17 +206,21 @@ export function KnowledgeView({
     }
   }, [neighbors, predicateFilter, focusId]);
 
-  // ── Force tuning on mount ───────────────────────────────────────────────
+  // ── Force tuning ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!fgRef.current) return;
     const fg = fgRef.current;
-    // strength = -120 means stronger repulsion than default (-30)
-    fg.d3Force("charge")?.strength(-130).distanceMax(360);
-    fg.d3Force("link")?.distance(80).strength(0.4);
-    // center gravity gentler
-    if (fg.d3Force("center")) {
-      fg.d3Force("center").strength(0.04);
-    }
+    // stronger repulsion + longer max range → groups spread out
+    fg.d3Force("charge")?.strength(-280).distanceMax(500);
+    // longer edges → satellites don't pile onto hubs
+    fg.d3Force("link")?.distance(120).strength(0.35);
+    // weaken center, let kind anchors do the work
+    if (fg.d3Force("center")) fg.d3Force("center").strength(0.02);
+    // kind clustering — pull each node to its kind anchor on a wide ring
+    fg.d3Force("kindX", forceX(n => kindAnchor(n.kind).x).strength(0.08));
+    fg.d3Force("kindY", forceY(n => kindAnchor(n.kind).y).strength(0.08));
+    // re-heat once so the new forces take effect
+    fg.d3ReheatSimulation();
   }, [graphData.nodes.length]);
 
   // ── Zoom % ──────────────────────────────────────────────────────────────
