@@ -37,6 +37,28 @@ const ENTITY_KIND_COLORS = {
   language:  "#9bff9b",
 };
 
+// predicate → semantic color group
+function predicateColor(p) {
+  if (!p) return "rgba(184,164,255,0.5)";
+  const s = p.toLowerCase();
+  if (/^(uses|built_with|requires|runs_on|reads)$/.test(s))                 return "rgba(126,231,135,0.65)";  // green — tech use
+  if (/^(contains|part_of|has_views|builds_as|groups|outputs|models)$/.test(s)) return "rgba(91,157,255,0.65)";  // blue — composition
+  if (/^(has_bug|had_bug|had_issue)$/.test(s))                              return "rgba(255,107,107,0.7)";   // red — problems
+  if (/^(has_lesson|has_decision|has_design|has_requirement|has_theme)$/.test(s)) return "rgba(255,180,84,0.65)"; // amber — wisdom
+  if (/^(lives_at|deploys_to|hosted_on|hosted_at|runs_on_port|stakeholder_of)$/.test(s)) return "rgba(255,107,157,0.65)"; // pink — location/people
+  if (/^(related_to|modified_by|opens|diagnoses|built_for|uses_language)$/.test(s)) return "rgba(160,207,255,0.6)";    // light blue
+  return "rgba(184,107,255,0.65)";  // purple — other
+}
+
+// predicate → semantic group name (for legend)
+const PREDICATE_GROUPS = [
+  { name: "Tech use",      color: "rgba(126,231,135,0.85)", preds: "uses, built_with, requires, runs_on, reads" },
+  { name: "Composition",   color: "rgba(91,157,255,0.85)",  preds: "contains, part_of, groups, outputs, models" },
+  { name: "Problems",      color: "rgba(255,107,107,0.85)", preds: "has_bug, had_bug, had_issue" },
+  { name: "Wisdom",        color: "rgba(255,180,84,0.85)",  preds: "has_lesson, has_decision, has_design" },
+  { name: "Place / People",color: "rgba(255,107,157,0.85)", preds: "lives_at, deploys_to, hosted_on, stakeholder_of" },
+];
+
 // ── utils ────────────────────────────────────────────────────────────────────
 function heatColor(t) {
   const c = [42,48,80].map((v,i) => Math.round(v + ([255,107,61][i]-v)*t));
@@ -759,7 +781,7 @@ function Field({ label, children }) {
 }
 
 // ── Knowledge view (entity-centric force graph) ──────────────────────────────
-function KnowledgeView({ data, hoverId, setHoverId }) {
+function KnowledgeView({ data, hoverId, setHoverId, kindFilter, onSelect, selectedEntityId }) {
   const wrapRef = useRef(null);
   const simRef  = useRef(new Map());
   const edgesRef = useRef(data.edges);
@@ -905,15 +927,37 @@ function KnowledgeView({ data, hoverId, setHoverId }) {
   const sizeFor = (n) => 4 + 14 * Math.sqrt((n.mention_count || 1) / maxMention);
   const colorFor = (n) => ENTITY_KIND_COLORS[n.kind] || "#888";
 
+  // visibility filter by kind chips
+  const visibleNodeIds = useMemo(() => {
+    if (!kindFilter || !kindFilter.size) return null;  // null = show all
+    return new Set(data.nodes.filter(n => kindFilter.has(n.kind || "other")).map(n => n.id));
+  }, [data.nodes, kindFilter]);
+
+  const visibleNodes = useMemo(() => {
+    if (!visibleNodeIds) return data.nodes;
+    return data.nodes.filter(n => visibleNodeIds.has(n.id));
+  }, [data.nodes, visibleNodeIds]);
+
+  const visibleEdges = useMemo(() => {
+    if (!visibleNodeIds) return data.edges;
+    return data.edges.filter(e => visibleNodeIds.has(e.src) && visibleNodeIds.has(e.dst));
+  }, [data.edges, visibleNodeIds]);
+
   const hoverNeighbors = useMemo(() => {
     if (!hoverId) return null;
     const s = new Set([hoverId]);
-    data.edges.forEach(e => {
+    visibleEdges.forEach(e => {
       if (e.src === hoverId) s.add(e.dst);
       if (e.dst === hoverId) s.add(e.src);
     });
     return s;
-  }, [hoverId, data.edges]);
+  }, [hoverId, visibleEdges]);
+
+  // top-N node IDs (always-labeled). Threshold by mention_count percentile.
+  const alwaysLabel = useMemo(() => {
+    const sorted = [...visibleNodes].sort((a,b) => (b.mention_count||0) - (a.mention_count||0));
+    return new Set(sorted.slice(0, 12).map(n => n.id));
+  }, [visibleNodes]);
 
   return (
     <div ref={wrapRef}
@@ -936,7 +980,7 @@ function KnowledgeView({ data, hoverId, setHoverId }) {
         </defs>
         <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
           {/* edges */}
-          {data.edges.map((e, i) => {
+          {visibleEdges.map((e, i) => {
             const a = nodePos.get(e.src), b = nodePos.get(e.dst);
             if (!a || !b) return null;
             const involved = hoverNeighbors?.has(e.src) && hoverNeighbors?.has(e.dst);
@@ -945,8 +989,8 @@ function KnowledgeView({ data, hoverId, setHoverId }) {
             return (
               <line key={i}
                 x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                stroke="rgba(184,164,255,0.5)"
-                strokeWidth={(0.6 + 0.8*(e.weight||0.5)) * (involved ? 2 : 1)}
+                stroke={predicateColor(e.predicate)}
+                strokeWidth={(0.6 + 1.1*(e.weight||0.5)) * (involved ? 2 : 1)}
                 strokeDasharray="8 4"
                 strokeDashoffset={offset}
                 opacity={dim ? 0.06 : 1}
@@ -954,7 +998,7 @@ function KnowledgeView({ data, hoverId, setHoverId }) {
             );
           })}
           {/* halos */}
-          {data.nodes.map(n => {
+          {visibleNodes.map(n => {
             const p = nodePos.get(n.id);
             if (!p) return null;
             const sz = sizeFor(n);
@@ -969,33 +1013,36 @@ function KnowledgeView({ data, hoverId, setHoverId }) {
             );
           })}
           {/* nodes */}
-          {data.nodes.map(n => {
+          {visibleNodes.map(n => {
             const p = nodePos.get(n.id);
             if (!p) return null;
             const sz = sizeFor(n);
             const isHover = hoverId === n.id;
+            const isSel   = selectedEntityId === n.id;
             const dim = hoverId && !hoverNeighbors?.has(n.id);
+            const labelOn = isHover || isSel || alwaysLabel.has(n.id);
             return (
               <g key={n.id}
                 onMouseEnter={() => setHoverId(n.id)}
                 onMouseLeave={() => setHoverId(null)}
+                onClick={(ev) => { ev.stopPropagation(); onSelect?.(n); }}
                 style={{ cursor:"pointer" }}
               >
                 <circle
                   cx={p.x} cy={p.y} r={sz}
                   fill={colorFor(n)}
                   opacity={dim ? 0.25 : 1}
-                  stroke={isHover ? "rgba(255,255,255,0.85)" : "none"}
-                  strokeWidth={1.5}
+                  stroke={isSel ? "#fff" : (isHover ? "rgba(255,255,255,0.85)" : "none")}
+                  strokeWidth={isSel ? 2.2 : 1.5}
                 />
-                {(sz > 7 || isHover) && (
+                {labelOn && (
                   <text
                     x={p.x} y={p.y + sz + 11 / transform.k}
                     textAnchor="middle"
-                    fill={isHover ? "#fff" : "#bbb"}
+                    fill={isHover || isSel ? "#fff" : "#aab"}
                     fontSize={11 / transform.k}
                     fontFamily="Inter,sans-serif"
-                    fontWeight={isHover ? 700 : 500}
+                    fontWeight={isHover || isSel ? 700 : 500}
                     opacity={dim ? 0.3 : 0.95}
                     style={{ paintOrder:"stroke", stroke:"#000", strokeWidth: 3/transform.k, strokeLinejoin:"round" }}
                   >{n.name}</text>
@@ -1008,7 +1055,7 @@ function KnowledgeView({ data, hoverId, setHoverId }) {
 
       {/* hover detail card */}
       {hoverId && (() => {
-        const n = data.nodes.find(x => x.id === hoverId);
+        const n = visibleNodes.find(x => x.id === hoverId);
         if (!n) return null;
         const incoming = data.edges.filter(e => e.dst === n.id);
         const outgoing = data.edges.filter(e => e.src === n.id);
@@ -1219,7 +1266,10 @@ function AuthGate({ children }) {
 function MindVaultApp() {
   const [view,            setView]            = useState("constellation");
   const [graph,           setGraph]           = useState({ nodes:[], edges:[] });
-  const [knowledge,       setKnowledge]       = useState({ nodes:[], edges:[] });
+  const [knowledge,       setKnowledge]       = useState({ nodes:[], edges:[], literals:[] });
+  const [kindFilter,      setKindFilter]      = useState(new Set());      // empty = all kinds
+  const [selectedEntity,  setSelectedEntity]  = useState(null);
+  const [entityProfile,   setEntityProfile]   = useState(null);
   const [projects,        setProjects]        = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
   const [selected,        setSelected]        = useState(null);
@@ -1308,6 +1358,15 @@ function MindVaultApp() {
       .catch(() => {});
   }, [selected]);
 
+  // entity profile fetch
+  useEffect(() => {
+    if (!selectedEntity) { setEntityProfile(null); return; }
+    fetch(`/api/entity/${selectedEntity.id}`)
+      .then(r => r.json())
+      .then(setEntityProfile)
+      .catch(() => {});
+  }, [selectedEntity]);
+
   // keyboard nav: '/' focus search, esc close, 1/2/3 views, 'f' fit
   const searchRef = useRef(null);
   useEffect(() => {
@@ -1315,7 +1374,8 @@ function MindVaultApp() {
       const t = e.target;
       const inField = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
       if (e.key === "Escape") {
-        if (selected || fullMemory) { setSelected(null); setFullMemory(null); }
+        if (selectedEntity) setSelectedEntity(null);
+        else if (selected || fullMemory) { setSelected(null); setFullMemory(null); }
         else if (search) setSearch("");
         else if (inField) t.blur();
         return;
@@ -1329,7 +1389,7 @@ function MindVaultApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, fullMemory, search, tick]);
+  }, [selected, fullMemory, selectedEntity, search, tick]);
 
   // filter pipeline
   const timeFiltered = useMemo(() => {
@@ -1507,13 +1567,23 @@ function MindVaultApp() {
           padding:"10px 12px", borderRadius:8,
           background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.04)",
         }}>
-          <Stat label="memories" value={stats?.memories ?? 0} color="#7ee787" />
-          <Stat label="edges"    value={stats?.edges ?? 0}    color="#5b9dff" />
-          <Stat label="visible"  value={visible.nodes.length} color="#ffb454" />
+          {view === "knowledge" ? (
+            <>
+              <Stat label="entities" value={stats?.entities ?? 0} color="#7ee787" />
+              <Stat label="triples"  value={stats?.triples ?? 0}  color="#b86bff" />
+              <Stat label="visible"  value={knowledge.nodes.length} color="#ffb454" />
+            </>
+          ) : (
+            <>
+              <Stat label="memories" value={stats?.memories ?? 0} color="#7ee787" />
+              <Stat label="edges"    value={stats?.edges ?? 0}    color="#5b9dff" />
+              <Stat label="visible"  value={visible.nodes.length} color="#ffb454" />
+            </>
+          )}
         </div>
 
-        {/* Search (constellation + archive views) */}
-        {view !== "file" && (
+        {/* Search (constellation + archive views — not knowledge or file) */}
+        {(view === "constellation" || view === "archive") && (
           <div style={{ position:"relative" }}>
             <input
               ref={searchRef}
@@ -1541,15 +1611,15 @@ function MindVaultApp() {
         )}
 
         {/* Search status — only when searching */}
-        {view !== "file" && search && (
+        {(view === "constellation" || view === "archive") && search && (
           <div style={{ marginTop:-10, fontSize:10, color:"#555", lineHeight:1.5 }}>
             {visible.nodes.length} match{visible.nodes.length===1?"":"es"}
             {smartResults ? ` · ${Object.keys(smartResults).length} semantic` : " · keyword only"}
           </div>
         )}
 
-        {/* Project filter */}
-        {view !== "file" && (
+        {/* Project filter (memory views only) */}
+        {(view === "constellation" || view === "archive") && (
           <div>
             <Label>Project</Label>
             <select value={selectedProject||""} onChange={e => setSelectedProject(e.target.value||null)} style={inputStyle}>
@@ -1583,6 +1653,57 @@ function MindVaultApp() {
           </>
         )}
 
+        {/* Knowledge-only controls */}
+        {view === "knowledge" && (
+          <>
+            <div>
+              <Label>Entity kinds</Label>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+                {(stats?.entity_kinds || []).map(k => {
+                  const active = kindFilter.has(k.kind);
+                  const color = ENTITY_KIND_COLORS[k.kind] || "#888";
+                  return (
+                    <button key={k.kind} onClick={() => {
+                      setKindFilter(prev => {
+                        const next = new Set(prev);
+                        if (next.has(k.kind)) next.delete(k.kind); else next.add(k.kind);
+                        return next;
+                      });
+                    }} style={{
+                      padding:"4px 9px", fontSize:10, fontWeight:600,
+                      borderRadius:12,
+                      border:`1px solid ${active ? color : "rgba(255,255,255,0.06)"}`,
+                      background: active ? `${color}22` : "transparent",
+                      color: active ? color : "#888",
+                      cursor:"pointer", textTransform:"capitalize",
+                    }}>{k.kind} <span style={{ opacity:0.55 }}>{k.count}</span></button>
+                  );
+                })}
+              </div>
+              {kindFilter.size > 0 && (
+                <button onClick={() => setKindFilter(new Set())} style={{
+                  marginTop:6, fontSize:10, color:"#666",
+                  background:"none", border:"none", cursor:"pointer", padding:0,
+                }}>clear filter</button>
+              )}
+            </div>
+
+            <div>
+              <Label>Edge meaning</Label>
+              <div style={{ display:"flex", flexDirection:"column", gap:4, fontSize:11 }}>
+                {PREDICATE_GROUPS.map(g => (
+                  <div key={g.name} style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{
+                      width:18, height:2, background:g.color, borderRadius:1, flexShrink:0,
+                    }} />
+                    <span style={{ color:"#aaa", fontSize:11 }}>{g.name}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+
         {/* Live indicator + actions */}
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
           <div style={{
@@ -1600,7 +1721,7 @@ function MindVaultApp() {
               {lastUpdated ? timeAgo(lastUpdated) : "…"}
             </span>
           </div>
-          {view !== "file" && (
+          {(view === "constellation" || view === "archive") && (
             <SBtn onClick={pruneOrphans} danger>Prune orphans</SBtn>
           )}
         </div>
@@ -1662,6 +1783,9 @@ function MindVaultApp() {
             data={knowledge}
             hoverId={hoverId}
             setHoverId={setHoverId}
+            kindFilter={kindFilter.size ? kindFilter : null}
+            onSelect={setSelectedEntity}
+            selectedEntityId={selectedEntity?.id}
           />
         )}
 
@@ -1679,6 +1803,152 @@ function MindVaultApp() {
             onWrote={() => { lastHashRef.current = { m: -1, e: -1 }; tick(); }}
             vexSay={vexSay}
           />
+        )}
+
+        {/* Entity profile panel (Knowledge view click) */}
+        {selectedEntity && entityProfile && (
+          <>
+            <div
+              onClick={() => setSelectedEntity(null)}
+              style={{ position:"absolute", inset:0, zIndex:9,
+                background:"rgba(0,0,0,0.15)", animation:"fadeIn 0.18s ease" }}
+            />
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                position:"absolute", right:20, top:20, width:400, maxHeight:"calc(100vh - 40px)",
+                overflowY:"auto", padding:20,
+                background:"rgba(10,10,20,0.97)",
+                border:`1px solid ${ENTITY_KIND_COLORS[entityProfile.entity.kind] || "#5b9dff"}33`,
+                borderRadius:14, backdropFilter:"blur(20px)",
+                boxShadow:"0 16px 56px rgba(0,0,0,0.75)", zIndex:10,
+                animation:"slideIn 0.22s cubic-bezier(.2,.8,.2,1)",
+              }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
+                <span style={{
+                  width:12, height:12, borderRadius:"50%",
+                  background: ENTITY_KIND_COLORS[entityProfile.entity.kind] || "#888",
+                  boxShadow:`0 0 10px ${ENTITY_KIND_COLORS[entityProfile.entity.kind] || "#888"}`,
+                }} />
+                <span style={{ fontSize:16, fontWeight:800, color:"#e6e6f0" }}>{entityProfile.entity.name}</span>
+                <span style={{
+                  marginLeft:"auto", fontSize:9, color:"#666", letterSpacing:1.2, textTransform:"uppercase",
+                }}>{entityProfile.entity.kind || "entity"}</span>
+                <button onClick={() => setSelectedEntity(null)} style={closeBtnStyle}>×</button>
+              </div>
+
+              <div style={{
+                padding:"8px 12px", borderRadius:6, marginBottom:14,
+                background:"rgba(255,255,255,0.025)",
+                fontSize:11, color:"#777", display:"flex", gap:14,
+              }}>
+                <span><b style={{color:"#aaa"}}>{entityProfile.entity.mention_count}</b> mentions</span>
+                <span><b style={{color:"#aaa"}}>{entityProfile.triples.length}</b> triples</span>
+                <span><b style={{color:"#aaa"}}>{entityProfile.memories.length}</b> memories</span>
+              </div>
+
+              {/* outgoing triples */}
+              {(() => {
+                const out = entityProfile.triples.filter(t => t.subj_id === entityProfile.entity.id);
+                if (!out.length) return null;
+                return (
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{
+                      fontSize:10, textTransform:"uppercase", letterSpacing:1.3,
+                      color:"#666", marginBottom:7, fontWeight:700,
+                    }}>Outgoing</div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                      {out.map((t,i) => (
+                        <div key={i} style={{
+                          padding:"6px 10px", borderRadius:5,
+                          background:"rgba(255,255,255,0.02)",
+                          border:"1px solid rgba(255,255,255,0.04)",
+                          fontSize:11, color:"#c8c8dc", lineHeight:1.4,
+                          display:"flex", gap:8, alignItems:"center",
+                        }}>
+                          <span style={{
+                            width:14, height:2, background:predicateColor(t.predicate),
+                            flexShrink:0, borderRadius:1,
+                          }} />
+                          <span style={{ color:"#7ab8ff", fontWeight:600 }}>{t.predicate}</span>
+                          <span style={{ color:"#999" }}>
+                            {t.obj_id ? entityProfile.names[t.obj_id]?.name : `"${t.obj_literal}"`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* incoming triples */}
+              {(() => {
+                const inc = entityProfile.triples.filter(t => t.obj_id === entityProfile.entity.id);
+                if (!inc.length) return null;
+                return (
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{
+                      fontSize:10, textTransform:"uppercase", letterSpacing:1.3,
+                      color:"#666", marginBottom:7, fontWeight:700,
+                    }}>Incoming</div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                      {inc.map((t,i) => (
+                        <div key={i} style={{
+                          padding:"6px 10px", borderRadius:5,
+                          background:"rgba(255,255,255,0.02)",
+                          border:"1px solid rgba(255,255,255,0.04)",
+                          fontSize:11, color:"#c8c8dc",
+                          display:"flex", gap:8, alignItems:"center",
+                        }}>
+                          <span style={{ color:"#aaa" }}>{entityProfile.names[t.subj_id]?.name}</span>
+                          <span style={{ color:"#666" }}>—</span>
+                          <span style={{ color:"#7ab8ff", fontWeight:600 }}>{t.predicate}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* source memories */}
+              {entityProfile.memories.length > 0 && (
+                <div>
+                  <div style={{
+                    fontSize:10, textTransform:"uppercase", letterSpacing:1.3,
+                    color:"#666", marginBottom:7, fontWeight:700,
+                  }}>From {entityProfile.memories.length} memor{entityProfile.memories.length===1?"y":"ies"}</div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                    {entityProfile.memories.map(m => (
+                      <div key={m.id}
+                        onClick={() => {
+                          setSelectedEntity(null);
+                          setView("constellation");
+                          setSelected(m);
+                        }}
+                        style={{
+                          padding:"8px 10px", borderRadius:6, cursor:"pointer",
+                          background:"rgba(255,255,255,0.025)",
+                          border:"1px solid rgba(255,255,255,0.05)",
+                        }}>
+                        <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom:4 }}>
+                          <span style={{
+                            width:6, height:6, borderRadius:"50%",
+                            background:KIND_COLORS[m.kind]||"#888",
+                          }} />
+                          <span style={{ fontSize:9, textTransform:"uppercase", letterSpacing:1,
+                            color:KIND_COLORS[m.kind]||"#888", fontWeight:700 }}>{m.kind}</span>
+                          <span style={{ marginLeft:"auto", fontSize:9, color:"#555" }}>{m.project}</span>
+                        </div>
+                        <div style={{ fontSize:11, color:"#c8c8dc", lineHeight:1.4 }}>
+                          {(m.content||"").slice(0, 140)}{(m.content||"").length>140?"…":""}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
         )}
 
         {/* Click-outside scrim — only when detail open */}

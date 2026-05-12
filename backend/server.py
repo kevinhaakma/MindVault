@@ -324,7 +324,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.29"
+VERSION = "0.1.30"
 
 
 @router.get("/health")
@@ -938,25 +938,74 @@ def knowledge_graph(kind: Optional[str] = None, limit: int = 1000):
 
     placeholders = ",".join("?" * len(ids))
     triple_rows = sql.execute(
-        f"SELECT subj_id, predicate, obj_id, obj_literal, weight "
+        f"SELECT subj_id, predicate, obj_id, obj_literal, weight, source_memory_id "
         f"FROM triples WHERE subj_id IN ({placeholders}) "
         f"  AND (obj_id IS NULL OR obj_id IN ({placeholders}))",
         ids + ids,
     ).fetchall()
 
-    edges = []
+    edges    = []
+    literals = []   # subj_id → list of {predicate, value}
     for t in triple_rows:
         if not t["obj_id"]:
-            continue   # skip literal-targets in graph view (still queryable elsewhere)
+            literals.append({
+                "subj_id":          t["subj_id"],
+                "predicate":        t["predicate"],
+                "value":            t["obj_literal"],
+                "weight":           t["weight"],
+                "source_memory_id": t["source_memory_id"],
+            })
+            continue
         edges.append({
-            "src":       t["subj_id"],
-            "dst":       t["obj_id"],
-            "predicate": t["predicate"],
-            "kind":      "triple",
-            "weight":    t["weight"],
+            "src":              t["subj_id"],
+            "dst":              t["obj_id"],
+            "predicate":        t["predicate"],
+            "kind":             "triple",
+            "weight":           t["weight"],
+            "source_memory_id": t["source_memory_id"],
         })
 
-    return {"nodes": nodes, "edges": edges}
+    return {"nodes": nodes, "edges": edges, "literals": literals}
+
+
+@router.get("/entity/{entity_id}")
+def entity_profile(entity_id: str):
+    """Full profile: entity + triples + linked source memories + neighbor names."""
+    _require_db()
+    row = sql.execute(
+        "SELECT id, name, canonical, kind, mention_count, created_at "
+        "FROM entities WHERE id = ?", (entity_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "entity not found")
+    triples = sql.execute(
+        "SELECT subj_id, predicate, obj_id, obj_literal, weight, source_memory_id "
+        "FROM triples WHERE subj_id = ? OR obj_id = ?",
+        (entity_id, entity_id),
+    ).fetchall()
+    mids = sorted({t["source_memory_id"] for t in triples if t["source_memory_id"]})
+    mems = []
+    if mids:
+        ph = ",".join("?" * len(mids))
+        rows = sql.execute(
+            f"SELECT id, content, project, kind, tags, created_at "
+            f"FROM memories WHERE id IN ({ph})", mids
+        ).fetchall()
+        mems = [dict(r) for r in rows]
+    fk_ids = list({t["obj_id"] for t in triples if t["obj_id"]} | {t["subj_id"] for t in triples})
+    fk_names = {}
+    if fk_ids:
+        ph = ",".join("?" * len(fk_ids))
+        for r in sql.execute(
+            f"SELECT id, name, kind FROM entities WHERE id IN ({ph})", fk_ids
+        ).fetchall():
+            fk_names[r["id"]] = {"name": r["name"], "kind": r["kind"]}
+    return {
+        "entity":   dict(row),
+        "triples":  [dict(t) for t in triples],
+        "memories": mems,
+        "names":    fk_names,
+    }
 
 
 @router.post("/relink")
@@ -1000,12 +1049,21 @@ def prune_orphans(project: Optional[str] = None):
 @router.get("/stats")
 def stats():
     _require_db()
-    total    = sql.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
-    edge_ct  = sql.execute("SELECT COUNT(*) as c FROM edges").fetchone()["c"]
-    projects = [dict(r) for r in sql.execute(
+    total     = sql.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
+    edge_ct   = sql.execute("SELECT COUNT(*) as c FROM edges").fetchone()["c"]
+    ent_ct    = sql.execute("SELECT COUNT(*) as c FROM entities").fetchone()["c"]
+    triple_ct = sql.execute("SELECT COUNT(*) as c FROM triples").fetchone()["c"]
+    projects  = [dict(r) for r in sql.execute(
         "SELECT project, COUNT(*) as count FROM memories GROUP BY project ORDER BY count DESC"
     ).fetchall()]
-    return {"memories": total, "edges": edge_ct, "projects": projects}
+    kinds = [dict(r) for r in sql.execute(
+        "SELECT kind, COUNT(*) as count FROM entities WHERE kind IS NOT NULL GROUP BY kind ORDER BY count DESC"
+    ).fetchall()]
+    return {
+        "memories": total, "edges": edge_ct,
+        "entities": ent_ct, "triples": triple_ct,
+        "projects": projects, "entity_kinds": kinds,
+    }
 
 
 # Mount at both / (dev proxy) and /api/ (production)
