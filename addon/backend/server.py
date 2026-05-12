@@ -324,7 +324,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.34"
+VERSION = "0.1.35"
 
 
 @router.get("/health")

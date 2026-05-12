@@ -154,8 +154,16 @@ export function KnowledgeView({
     let raf;
     let last = performance.now();
     const start = last;
-    const REPEL = 0.020, SPRING = 1.7, IDEAL = 0.20, DAMP = 0.85, GRAVITY = 0.18,
-          MAX_V = 1.4, SIM_K = 6, KIND_PULL = 0.012;
+    const REPEL    = 0.030,   // pairwise inverse-square strength
+          MIN_D2   = 0.006,   // distance² floor — prevents force explosion when nodes overlap
+          MAX_F    = 1.2,     // per-pair force cap
+          SPRING   = 1.5,
+          IDEAL    = 0.22,
+          DAMP     = 0.82,
+          GRAVITY  = 0.18,
+          MAX_V    = 1.0,
+          SIM_K    = 5,
+          KIND_PULL = 0.008;
     const kindAnchor = (k) => {
       const kinds = Object.keys(ENTITY_KIND_COLORS);
       const idx = kinds.indexOf(k);
@@ -177,10 +185,17 @@ export function KnowledgeView({
         const a = arr[i];
         for (let j = i + 1; j < arr.length; j++) {
           const b = arr[j];
-          const dx = b.x - a.x, dy = b.y - a.y;
-          const d2 = dx * dx + dy * dy + 0.001;
-          const d  = Math.sqrt(d2);
-          const f  = REPEL / d2;
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let d2 = dx * dx + dy * dy;
+          // floor distance² so coincident nodes don't blow up
+          if (d2 < MIN_D2) {
+            // also nudge if exactly coincident
+            if (d2 < 1e-6) { dx = (Math.random() - 0.5) * 0.05; dy = (Math.random() - 0.5) * 0.05; }
+            d2 = MIN_D2;
+          }
+          const d = Math.sqrt(d2);
+          let f = REPEL / d2;
+          if (f > MAX_F) f = MAX_F;
           const fx = (dx / d) * f, fy = (dy / d) * f;
           a.vx -= fx; a.vy -= fy;
           b.vx += fx; b.vy += fy;
@@ -294,12 +309,28 @@ export function KnowledgeView({
     return s;
   }, [hoverId, visibleEdges]);
 
-  // Always label hubs (top N), or any node big enough at current zoom
+  // Always-label: top-mention nodes, but skip if a higher-priority label is too close (avoid overlap).
   const alwaysLabel = useMemo(() => {
     const sorted = [...visibleNodes].sort((a, b) => (b.mention_count || 0) - (a.mention_count || 0));
-    const topN = Math.min(visibleNodes.length, Math.max(12, Math.floor(visibleNodes.length * 0.4)));
-    return new Set(sorted.slice(0, topN).map(n => n.id));
-  }, [visibleNodes]);
+    const candidates = sorted.slice(0, Math.min(visibleNodes.length, Math.max(12, Math.floor(visibleNodes.length * 0.4))));
+    const MIN_LABEL_DIST = 38 / Math.max(transform.k, 0.5); // pixel space — scale-adjusted
+    const placed = []; // [{x, y}]
+    const kept = new Set();
+    for (const n of candidates) {
+      const p = nodePos.get(n.id);
+      if (!p) continue;
+      let tooClose = false;
+      for (const q of placed) {
+        const dx = p.x - q.x, dy = p.y - q.y;
+        if (dx * dx + dy * dy < MIN_LABEL_DIST * MIN_LABEL_DIST) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        placed.push(p);
+        kept.add(n.id);
+      }
+    }
+    return kept;
+  }, [visibleNodes, nodePos, transform.k]);
 
   return (
     <div ref={wrapRef} onMouseDown={handleMouseDown} style={{
