@@ -297,7 +297,7 @@ def _auto_link(mem_id: str, vec: np.ndarray, project: str):
 
 
 # --- routes ---
-VERSION = "0.1.24"
+VERSION = "0.1.25"
 
 
 @router.get("/health")
@@ -313,6 +313,59 @@ def health():
 @router.get("/version")
 def version():
     return {"version": VERSION}
+
+
+# ── supervisor passthrough (requires hassio_api: true in config.yaml) ────────
+import json as _json
+from urllib.request import Request as _Req, urlopen as _urlopen
+from urllib.error  import HTTPError as _HTTPError
+
+_SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
+_SUPERVISOR_BASE  = "http://supervisor"
+
+
+def _sup(method: str, path: str, body: Optional[dict] = None) -> dict:
+    if not _SUPERVISOR_TOKEN:
+        raise HTTPException(503, "Supervisor token not available (hassio_api off?)")
+    url = f"{_SUPERVISOR_BASE}{path}"
+    data = _json.dumps(body).encode() if body is not None else None
+    req = _Req(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {_SUPERVISOR_TOKEN}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with _urlopen(req, timeout=30) as r:
+            return _json.loads(r.read())
+    except _HTTPError as e:
+        return {"error": e.read().decode(errors="ignore"), "status": e.code}
+
+
+@router.get("/supervisor/addons")
+def sup_addons():
+    return _sup("GET", "/addons")
+
+
+@router.get("/supervisor/addons/{slug}/info")
+def sup_addon_info(slug: str):
+    return _sup("GET", f"/addons/{slug}/info")
+
+
+class SupOptions(BaseModel):
+    options: dict
+
+
+@router.post("/supervisor/addons/{slug}/options")
+def sup_addon_options(slug: str, req: SupOptions):
+    return _sup("POST", f"/addons/{slug}/options", {"options": req.options})
+
+
+@router.post("/supervisor/addons/{slug}/restart")
+def sup_addon_restart(slug: str):
+    return _sup("POST", f"/addons/{slug}/restart")
+
+
+@router.post("/supervisor/addons/{slug}/start")
+def sup_addon_start(slug: str):
+    return _sup("POST", f"/addons/{slug}/start")
 
 
 @router.post("/backup")
